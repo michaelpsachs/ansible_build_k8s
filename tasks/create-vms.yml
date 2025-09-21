@@ -126,7 +126,7 @@
 
 - name: "Wait for VMs to boot and configure"
   pause:
-    seconds: 90
+    seconds: 200
     prompt: "Waiting for VMs to boot and cloud-init to complete..."
 
 - name: "Verify VMs are running"

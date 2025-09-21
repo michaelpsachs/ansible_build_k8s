@@ -1,4 +1,19 @@
 ---
+- name: "Get VM IP addresses"
+  shell: |
+    virsh domifaddr k8s-control | grep -E 'ipv4' | awk '{print $4}' | cut -d'/' -f1
+  register: control_ip
+  
+- name: "Get worker1 IP"
+  shell: |
+    virsh domifaddr k8s-worker1 | grep -E 'ipv4' | awk '{print $4}' | cut -d'/' -f1
+  register: worker1_ip
+  
+- name: "Get worker2 IP"
+  shell: |
+    virsh domifaddr k8s-worker2 | grep -E 'ipv4' | awk '{print $4}' | cut -d'/' -f1
+  register: worker2_ip
+
 - name: "Create Kubespray inventory directory"
   file:
     path: "{{ item }}"
@@ -9,29 +24,29 @@
     - "~/kubespray/inventory/mycluster/group_vars/all"
     - "~/kubespray/inventory/mycluster/group_vars/k8s_cluster"
 
-- name: "Create inventory file"
+- name: "Create inventory file with dynamic IPs"
   copy:
     content: |
       all:
         hosts:
           k8s-control:
-            ansible_host: 192.168.122.98
+            ansible_host: {{ control_ip.stdout.strip() }}
             ansible_user: ubuntu
             ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-            ip: 192.168.122.98
-            access_ip: 192.168.122.98
+            ip: {{ control_ip.stdout.strip() }}
+            access_ip: {{ control_ip.stdout.strip() }}
           k8s-worker1:
-            ansible_host: 192.168.122.138
+            ansible_host: {{ worker1_ip.stdout.strip() }}
             ansible_user: ubuntu
             ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-            ip: 192.168.122.138
-            access_ip: 192.168.122.138
+            ip: {{ worker1_ip.stdout.strip() }}
+            access_ip: {{ worker1_ip.stdout.strip() }}
           k8s-worker2:
-            ansible_host: 192.168.122.211
+            ansible_host: {{ worker2_ip.stdout.strip() }}
             ansible_user: ubuntu
             ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-            ip: 192.168.122.211
-            access_ip: 192.168.122.211
+            ip: {{ worker2_ip.stdout.strip() }}
+            access_ip: {{ worker2_ip.stdout.strip() }}
         children:
           kube_control_plane:
             hosts:
@@ -51,30 +66,9 @@
             hosts: {}
     dest: "~/kubespray/inventory/mycluster/hosts.yml"
 
-- name: "Test Ansible connectivity"
+- name: "Test Ansible connectivity with proper shell"
   shell: |
     cd ~/kubespray
-    source venv/bin/activate 2>/dev/null || python3 -m venv venv && source venv/bin/activate
-    ansible -i inventory/mycluster/hosts.yml all -m ping
+    /bin/bash -c "source venv/bin/activate 2>/dev/null || python3 -m venv venv && source venv/bin/activate && ansible -i inventory/mycluster/hosts.yml all -m ping"
   register: ping_test
   ignore_errors: yes
-
-- name: "Show connectivity results"
-  debug:
-    msg: "{{ ping_test.stdout_lines }}"
-  when: ping_test.stdout_lines is defined
-
-- name: "Next steps"
-  debug:
-    msg: |
-      If all pings are successful, run Kubespray:
-      cd ~/kubespray
-      source venv/bin/activate
-      # Run the deployment (takes 15-30 minutes)
-      ansible-playbook -i inventory/mycluster/hosts.yml cluster.yml -b
-      
-      After deployment, get kubeconfig:
-      ansible -i inventory/mycluster/hosts.yml k8s-control -m fetch \
-        -a "src=/etc/kubernetes/admin.conf dest=./kubeconfig flat=yes" -b
-      export KUBECONFIG=~/kubespray/kubeconfig
-      kubectl get nodes
