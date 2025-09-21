@@ -19,7 +19,7 @@
       sudo chown libvirt-qemu:libvirt-qemu /var/lib/libvirt/images/ubuntu-base.img
     fi'
 
-- name: "Create reliable cloud-init files"
+- name: "Create dual-key cloud-init files"
   copy:
     content: |
       #cloud-config
@@ -27,63 +27,30 @@
         - name: ubuntu
           plain_text_passwd: ubuntu
           lock_passwd: false
-          sudo: ALL=(ALL) NOPASSWD:ALL
+          sudo: ['ALL=(ALL) NOPASSWD:ALL']
           shell: /bin/bash
           ssh_authorized_keys:
-            - {{ ssh_key }}
-        - name: root
-          lock_passwd: false
-          ssh_authorized_keys:
-            - {{ ssh_key }}
-      
-      chpasswd:
-        expire: false
-        users:
-          - name: ubuntu
-            password: ubuntu
-            type: text
-          - name: root
-            password: ubuntu
-            type: text
+            - {{ ssh_public_key }}
+            - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDNez/7KYhmC3H/jBmFWDKt7jCoiTrl4aOl6d3Uy6ndh80Spb+UVpEHkNvLYXB+XJ7bx5i8fqh4UE6Yo7prQVkv8Ti2BApqHSPzy2fVZGGBVbsUtzpmJ3Xbb+jZdqW76x9XnoFxwmTVDz76M4ox8ralaF6vOZA66IUCGCULM1YeCa/Berb/Le7RjV6Cq1Q/ljnMzSVtqasMPSXgENH5mFJ7pACk5TA55FMhObAtb/wsu1opJjBhqRF5lxhUz7TaemeFrUrV8AYlmxdhK5IXHjv735Zoj2yYXw1nrHzwpB9xbYxoSt3CIxJpIZ27nw5WHPxupPsLgmzQp1oxM1B/HfqQheymKMscYpDl6E7XwF94oEWaJNJlvTi0G52gQBKGTB3Luqug5qpbL7WuPJsfog9k+FDmvuN2rdJU4gdkpRxiRRC6B/Khql0d+TkMbiJph/QiIf31tVKPqXytRA2NeRze9GUJWLbYqqAfwpZBgzEWbO9/O69EHP2BS/Oq0FMByWc= mike@mike-17Z90P-K-AAC8U1
       
       ssh_pwauth: true
-      disable_root: false
+      chpasswd:
+        expire: false
       
-      package_update: true
       packages:
         - openssh-server
-        - curl
-        - wget
-        - net-tools
-        - apt-transport-https
-        - ca-certificates
-        - gnupg
-        - lsb-release
-      
-      write_files:
-        - path: /etc/ssh/sshd_config.d/99-k8s.conf
-          content: |
-            PasswordAuthentication yes
-            PubkeyAuthentication yes
-            PermitRootLogin yes
-          permissions: '0644'
       
       runcmd:
-        - mkdir -p /home/ubuntu/.ssh /root/.ssh
-        - chmod 700 /home/ubuntu/.ssh /root/.ssh
-        - echo "{{ ssh_key }}" > /home/ubuntu/.ssh/authorized_keys
-        - echo "{{ ssh_key }}" > /root/.ssh/authorized_keys
-        - chmod 600 /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
-        - chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
-        - chown root:root /root/.ssh/authorized_keys
         - echo 'ubuntu:ubuntu' | chpasswd
-        - echo 'root:ubuntu' | chpasswd
         - systemctl enable ssh
-        - systemctl restart ssh
-        - systemctl status ssh
-        - echo "{{ item.key }} VM ready" > /var/log/vm-ready.log
-      
-      final_message: "{{ item.key }} VM ready with ubuntu/ubuntu and SSH keys"
+        - systemctl start ssh
+        - mkdir -p /home/ubuntu/.ssh
+        - chmod 700 /home/ubuntu/.ssh
+        - echo "{{ ssh_public_key }}" > /home/ubuntu/.ssh/authorized_keys
+        - echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDNez/7KYhmC3H/jBmFWDKt7jCoiTrl4aOl6d3Uy6ndh80Spb+UVpEHkNvLYXB+XJ7bx5i8fqh4UE6Yo7prQVkv8Ti2BApqHSPzy2fVZGGBVbsUtzpmJ3Xbb+jZdqW76x9XnoFxwmTVDz76M4ox8ralaF6vOZA66IUCGCULM1YeCa/Berb/Le7RjV6Cq1Q/ljnMzSVtqasMPSXgENH5mFJ7pACk5TA55FMhObAtb/wsu1opJjBhqRF5lxhUz7TaemeFrUrV8AYlmxdhK5IXHjv735Zoj2yYXw1nrHzwpB9xbYxoSt3CIxJpIZ27nw5WHPxupPsLgmzQp1oxM1B/HfqQheymKMscYpDl6E7XwF94oEWaJNJlvTi0G52gQBKGTB3Luqug5qpbL7WuPJsfog9k+FDmvuN2rdJU4gdkpRxiRRC6B/Khql0d+TkMbiJph/QiIf31tVKPqXytRA2NeRze9GUJWLbYqqAfwpZBgzEWbO9/O69EHP2BS/Oq0FMByWc= mike@mike-17Z90P-K-AAC8U1" >> /home/ubuntu/.ssh/authorized_keys
+        - chmod 600 /home/ubuntu/.ssh/authorized_keys
+        - chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+        - echo "{{ item.key }} setup complete" > /tmp/cloud-init-done
     dest: "/tmp/{{ item.key }}-userdata"
   loop: "{{ cluster_vms | dict2items }}"
 
@@ -126,8 +93,13 @@
 
 - name: "Wait for VMs to boot and configure"
   pause:
-    seconds: 200
-    prompt: "Waiting for VMs to boot and cloud-init to complete..."
+    seconds: 180
+    prompt: |
+      Waiting for VMs to boot and cloud-init to complete...
+      This may take 2-3 minutes for:
+      - VM boot process
+      - Cloud-init configuration
+      - SSH service startup
 
 - name: "Verify VMs are running"
   shell: |
