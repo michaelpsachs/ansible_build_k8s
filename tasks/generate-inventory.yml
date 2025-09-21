@@ -1,52 +1,40 @@
 ---
-- name: "Get VM IP addresses"
-  shell: |
-    virsh domifaddr k8s-control | grep -E 'ipv4' | awk '{print $4}' | cut -d'/' -f1
-  register: control_ip
-  
-- name: "Get worker1 IP"
-  shell: |
-    virsh domifaddr k8s-worker1 | grep -E 'ipv4' | awk '{print $4}' | cut -d'/' -f1
-  register: worker1_ip
-  
-- name: "Get worker2 IP"
-  shell: |
-    virsh domifaddr k8s-worker2 | grep -E 'ipv4' | awk '{print $4}' | cut -d'/' -f1
-  register: worker2_ip
-
-- name: "Create Kubespray inventory directory"
+# tasks/generate-inventory.yml
+- name: Create Kubespray inventory directory
   file:
     path: "{{ item }}"
     state: directory
-  loop:
-    - "~/kubespray/inventory/mycluster"
-    - "~/kubespray/inventory/mycluster/group_vars"
-    - "~/kubespray/inventory/mycluster/group_vars/all"
-    - "~/kubespray/inventory/mycluster/group_vars/k8s_cluster"
+    mode: '0755'
+  with_items:
+    - ~/kubespray/inventory/mycluster
+    - ~/kubespray/inventory/mycluster/group_vars
+    - ~/kubespray/inventory/mycluster/group_vars/all
+    - ~/kubespray/inventory/mycluster/group_vars/k8s_cluster
 
-- name: "Create inventory file with dynamic IPs"
+- name: Generate Kubespray inventory for Raspberry Pi control
   copy:
+    dest: ~/kubespray/inventory/mycluster/hosts.yml
     content: |
       all:
         hosts:
           k8s-control:
-            ansible_host: {{ control_ip.stdout.strip() }}
-            ansible_user: ubuntu
-            ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-            ip: {{ control_ip.stdout.strip() }}
-            access_ip: {{ control_ip.stdout.strip() }}
+            ansible_host: {{ vm_ip_addresses['k8s-control'] }}
+            ansible_user: {{ ssh_user }}
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+            ip: {{ vm_ip_addresses['k8s-control'] }}
+            access_ip: {{ vm_ip_addresses['k8s-control'] }}
           k8s-worker1:
-            ansible_host: {{ worker1_ip.stdout.strip() }}
-            ansible_user: ubuntu
-            ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-            ip: {{ worker1_ip.stdout.strip() }}
-            access_ip: {{ worker1_ip.stdout.strip() }}
+            ansible_host: {{ vm_ip_addresses['k8s-worker1'] }}
+            ansible_user: {{ ssh_user }}
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+            ip: {{ vm_ip_addresses['k8s-worker1'] }}
+            access_ip: {{ vm_ip_addresses['k8s-worker1'] }}
           k8s-worker2:
-            ansible_host: {{ worker2_ip.stdout.strip() }}
-            ansible_user: ubuntu
-            ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-            ip: {{ worker2_ip.stdout.strip() }}
-            access_ip: {{ worker2_ip.stdout.strip() }}
+            ansible_host: {{ vm_ip_addresses['k8s-worker2'] }}
+            ansible_user: {{ ssh_user }}
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+            ip: {{ vm_ip_addresses['k8s-worker2'] }}
+            access_ip: {{ vm_ip_addresses['k8s-worker2'] }}
         children:
           kube_control_plane:
             hosts:
@@ -64,11 +52,60 @@
               kube_node:
           calico_rr:
             hosts: {}
-    dest: "~/kubespray/inventory/mycluster/hosts.yml"
 
-- name: "Test Ansible connectivity with proper shell"
-  shell: |
-    cd ~/kubespray
-    /bin/bash -c "source venv/bin/activate 2>/dev/null || python3 -m venv venv && source venv/bin/activate && ansible -i inventory/mycluster/hosts.yml all -m ping"
-  register: ping_test
-  ignore_errors: yes
+- name: Configure Kubespray variables
+  copy:
+    dest: ~/kubespray/inventory/mycluster/group_vars/all/all.yml
+    content: |
+      ---
+      # Ansible settings
+      ansible_user: {{ ssh_user }}
+      ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+      ansible_become: yes
+      ansible_become_method: sudo
+      
+      # Networking
+      kube_network_plugin: calico
+      kube_network_plugin_multus: false
+      kube_service_addresses: 10.233.0.0/18
+      kube_pods_subnet: 10.233.64.0/18
+      
+      # DNS
+      cluster_name: cluster.local
+      ndots: 2
+      dns_mode: coredns
+      
+      # Other settings
+      kubeconfig_localhost: true
+      kubectl_localhost: true
+      helm_enabled: true
+      metrics_server_enabled: true
+      ingress_nginx_enabled: true
+
+- name: Create inventory file for Raspberry Pi
+  copy:
+    dest: ~/inventory-for-pi.ini
+    content: |
+      # Ansible inventory for controlling from Raspberry Pi
+      # Copy this to your Raspberry Pi and use with ansible commands
+      
+      [control]
+      k8s-control ansible_host={{ vm_ip_addresses['k8s-control'] }} ansible_user=ansible
+      
+      [workers]
+      k8s-worker1 ansible_host={{ vm_ip_addresses['k8s-worker1'] }} ansible_user=ansible
+      k8s-worker2 ansible_host={{ vm_ip_addresses['k8s-worker2'] }} ansible_user=ansible
+      
+      [k8s:children]
+      control
+      workers
+      
+      [all:vars]
+      ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+- name: Display inventory info
+  debug:
+    msg:
+      - "Kubespray inventory created at: ~/kubespray/inventory/mycluster/hosts.yml"
+      - "Simple inventory for Raspberry Pi saved at: ~/inventory-for-pi.ini"
+      - "Copy ~/inventory-for-pi.ini to your Raspberry Pi to run ansible commands"

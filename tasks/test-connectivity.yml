@@ -1,6 +1,0 @@
-- name: "Test Ansible connectivity"
-  shell: |
-    cd ~/kubespray
-    /bin/bash -c "source venv/bin/activate 2>/dev/null || python3 -m venv venv && source venv/bin/activate && ansible -i inventory/mycluster/hosts.yml all -m ping"
-  register: ping_test
-  ignore_errors: yes

@@ -1,0 +1,201 @@
+---
+# tasks/create-vms-enhanced.yml
+- name: Clean up any existing VMs
+  shell: |
+    for vm in k8s-control k8s-worker1 k8s-worker2; do
+      virsh destroy $vm 2>/dev/null || true
+      virsh undefine $vm --remove-all-storage 2>/dev/null || true
+    done
+  ignore_errors: yes
+
+- name: Ensure Ubuntu cloud image exists
+  get_url:
+    url: https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
+    dest: "{{ base_image }}"
+    mode: '0644'
+  become: yes
+
+- name: Use Raspberry Pi SSH public key
+  set_fact:
+    ssh_public_key: "{{ ssh_public_key_content }}"
+
+- name: Verify we have the SSH public key
+  assert:
+    that:
+      - ssh_public_key is defined
+      - ssh_public_key | length > 0
+      - ssh_public_key != ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/EjjlcKFIT5KO3lCefJLxI61ZYL2oQ6Zlr665Y2CKn michaelpsachs@gmail.com
+
+    fail_msg: |
+      ERROR: You need to add your Raspberry Pi's SSH public key!
+      
+      1. On your Raspberry Pi, run:
+         cat ~/.ssh/id_rsa.pub
+         (or cat ~/.ssh/id_ed25519.pub if using ed25519)
+      
+      2. Copy the entire output (starting with ssh-rsa or ssh-ed25519)
+      
+      3. Edit deploy-k8s-cluster.yml and replace YOUR_RASPBERRY_PI_SSH_PUBLIC_KEY_HERE
+         with your actual key
+
+- name: Display SSH public key being used (first 50 chars)
+  debug:
+    msg: "Using SSH public key: {{ ssh_public_key | truncate(50) }}..."
+
+- name: Create enhanced cloud-init configurations
+  copy:
+    dest: "/tmp/cloud-init-{{ item.key }}.yml"
+    content: |
+      #cloud-config
+      hostname: {{ item.key }}
+      manage_etc_hosts: true
+      
+      # Create ansible user with Raspberry Pi SSH key
+      users:
+        - name: {{ ssh_user }}
+          groups: [wheel, sudo]
+          sudo: ['ALL=(ALL) NOPASSWD:ALL']
+          shell: /bin/bash
+          lock_passwd: true
+          ssh_authorized_keys:
+            - {{ ssh_public_key }}
+        # Also add for ubuntu user as backup
+        - name: ubuntu
+          groups: [wheel, sudo]
+          sudo: ['ALL=(ALL) NOPASSWD:ALL']
+          shell: /bin/bash
+          lock_passwd: true
+          ssh_authorized_keys:
+            - {{ ssh_public_key }}
+      
+      # Disable SSH password authentication - key only
+      ssh_pwauth: false
+      disable_root: false
+      
+      # Package management
+      package_update: true
+      package_upgrade: true
+      packages:
+        - qemu-guest-agent
+        - python3
+        - python3-pip
+        - curl
+        - vim
+        - net-tools
+        - openssh-server
+        - htop
+        - iotop
+      
+      # Ensure SSH is started and enabled
+      runcmd:
+        - systemctl enable ssh
+        - systemctl start ssh
+        - systemctl enable qemu-guest-agent
+        - systemctl start qemu-guest-agent
+        - touch /var/lib/cloud/instance/boot-finished
+        - echo "Cloud-init completed at $(date)" >> /var/log/cloud-init-done.log
+        - echo "SSH key for ansible user installed" >> /var/log/cloud-init-done.log
+      
+      # Speed up boot
+      growpart:
+        mode: auto
+        devices: ['/']
+      
+      # Final message
+      final_message: "Cloud-init completed in $UPTIME seconds - Ready for Raspberry Pi access"
+      
+  with_dict: "{{ vm_specs }}"
+
+- name: Create cloud-init ISOs
+  shell: |
+    cloud-localds /tmp/cloud-init-{{ item.key }}.iso /tmp/cloud-init-{{ item.key }}.yml
+  with_dict: "{{ vm_specs }}"
+
+- name: Create VM disks
+  shell: |
+    qemu-img create -f qcow2 -b {{ base_image }} -F qcow2 \
+      /var/lib/libvirt/images/{{ item.key }}.qcow2 {{ item.value.disk }}G
+  become: yes
+  with_dict: "{{ vm_specs }}"
+
+- name: Create VMs with cloud-init
+  shell: |
+    virt-install \
+      --name {{ item.key }} \
+      --memory {{ item.value.memory }} \
+      --vcpus {{ item.value.vcpus }} \
+      --disk /var/lib/libvirt/images/{{ item.key }}.qcow2,device=disk,bus=virtio \
+      --disk /tmp/cloud-init-{{ item.key }}.iso,device=cdrom \
+      --os-variant ubuntu22.04 \
+      --network network={{ network_name }} \
+      --graphics none \
+      --console pty,target_type=serial \
+      --noautoconsole \
+      --boot hd \
+      --autostart
+  become: yes
+  with_dict: "{{ vm_specs }}"
+
+- name: Wait for VMs to be running
+  shell: virsh domstate {{ item.key }}
+  register: vm_state
+  until: vm_state.stdout == "running"
+  retries: 10
+  delay: 5
+  with_dict: "{{ vm_specs }}"
+
+- name: Get VM MAC addresses
+  shell: |
+    virsh domiflist {{ item.key }} | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1
+  register: mac_addresses
+  with_dict: "{{ vm_specs }}"
+
+- name: Wait for DHCP lease (10 minute timeout)
+  shell: |
+    virsh net-dhcp-leases {{ network_name }} | grep -i {{ item.stdout }} | awk '{print $5}' | cut -d'/' -f1
+  register: vm_ips
+  until: vm_ips.stdout != ""
+  retries: 60  # 60 retries * 10 seconds = 10 minutes
+  delay: 10
+  with_items: "{{ mac_addresses.results }}"
+
+- name: Store VM IPs in facts
+  set_fact:
+    vm_ip_addresses: |
+      {% set ips = {} %}
+      {% for i in range(mac_addresses.results | length) %}
+      {% set _ = ips.update({mac_addresses.results[i].item.key: vm_ips.results[i].stdout}) %}
+      {% endfor %}
+      {{ ips }}
+
+- name: Display VM information for Raspberry Pi access
+  debug:
+    msg:
+      - "========================================="
+      - "VM Created: {{ item.key }}"
+      - "IP Address: {{ item.value }}"
+      - "SSH from Raspberry Pi: ssh {{ ssh_user }}@{{ item.value }}"
+      - "Alt SSH: ssh ubuntu@{{ item.value }}"
+      - "========================================="
+  with_dict: "{{ vm_ip_addresses }}"
+
+- name: Save VM IPs to file for easy reference
+  copy:
+    dest: ~/vm-ips.txt
+    content: |
+      Kubernetes Cluster VMs - Access from Raspberry Pi
+      ==================================================
+      
+      Control Node:
+        k8s-control: {{ vm_ip_addresses['k8s-control'] }}
+        SSH: ssh ansible@{{ vm_ip_addresses['k8s-control'] }}
+      
+      Worker Nodes:
+        k8s-worker1: {{ vm_ip_addresses['k8s-worker1'] }}
+        SSH: ssh ansible@{{ vm_ip_addresses['k8s-worker1'] }}
+        
+        k8s-worker2: {{ vm_ip_addresses['k8s-worker2'] }}
+        SSH: ssh ansible@{{ vm_ip_addresses['k8s-worker2'] }}
+      
+      All VMs are configured with your Raspberry Pi SSH key.
+      You can now SSH directly from your Raspberry Pi without a password.
