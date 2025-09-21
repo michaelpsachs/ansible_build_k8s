@@ -17,17 +17,17 @@
         state: present
         update_cache: yes
 
-    - name: Add Kubernetes apt key
-      shell: |
-        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-      args:
-        warn: false
+    - name: Download Kubernetes apt key
+  get_url:
+    url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    dest: /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+    mode: '0644'
 
-    - name: Add Kubernetes apt repository
-      copy:
-        dest: /etc/apt/sources.list.d/kubernetes.list
-        content: |
-          deb https://apt.kubernetes.io/ kubernetes-xenial main
+- name: Add Kubernetes apt repository
+  apt_repository:
+    repo: deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main
+    state: present
+    filename: kubernetes
 
     - name: Install kubeadm, kubelet, kubectl
       apt:
