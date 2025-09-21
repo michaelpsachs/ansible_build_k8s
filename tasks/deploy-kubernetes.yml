@@ -1,13 +1,73 @@
-- name: Deploy Kubernetes on VMs
+---
+- name: Deploy Kubernetes on VMs using kubeadm
   hosts: all
   become: yes
+  vars_files:
+    - ../group_vars/laptop.yml
+
   tasks:
-    - name: Install k3s on control node
+    - name: Install dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Add Kubernetes apt key
       shell: |
-        curl -sfL https://get.k3s.io | sh -
+        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+      args:
+        warn: false
+
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb https://apt.kubernetes.io/ kubernetes-xenial main
+
+    - name: Install kubeadm, kubelet, kubectl
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: yes
+
+    - name: Disable swap
+      shell: |
+        swapoff -a
+        sed -i '/ swap / s/^/#/' /etc/fstab
+
+    - name: Initialize control plane
+      shell: |
+        kubeadm init --pod-network-cidr=10.244.0.0/16
+      when: inventory_hostname == "k8s-control"
+      register: kubeadm_init
+
+    - name: Set up kubeconfig for ansible user
+      shell: |
+        mkdir -p /home/{{ ssh_user }}/.kube
+        cp -i /etc/kubernetes/admin.conf /home/{{ ssh_user }}/.kube/config
+        chown {{ ssh_user }}:{{ ssh_user }} /home/{{ ssh_user }}/.kube/config
       when: inventory_hostname == "k8s-control"
 
-    - name: Join worker nodes
+    - name: Install Flannel CNI
+      become_user: "{{ ssh_user }}"
       shell: |
-        curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars['k8s-control']['ansible_host'] }}:6443 K3S_TOKEN=YOUR_TOKEN sh -
+        kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+      when: inventory_hostname == "k8s-control"
+
+    - name: Get join command
+      shell: kubeadm token create --print-join-command
+      register: join_cmd
+      when: inventory_hostname == "k8s-control"
+      run_once: true
+
+    - name: Join worker nodes to cluster
+      shell: "{{ join_cmd.stdout }}"
       when: inventory_hostname != "k8s-control"
