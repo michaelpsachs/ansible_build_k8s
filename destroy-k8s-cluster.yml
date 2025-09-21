@@ -1,30 +1,33 @@
 ---
-# destroy-k8s-from-pi.yml - Run from Pi to destroy VMs on laptop
+# destroy-k8s-cluster.yml - Run from Pi to destroy VMs on laptop
+# Usage: ansible-playbook -i laptop-inventory.ini destroy-k8s-cluster.yml
 
 - name: Destroy K8s cluster on laptop from Raspberry Pi
   hosts: laptop
   gather_facts: no
   
+  vars_prompt:
+    - name: confirm_destroy
+      prompt: "This will destroy ALL K8s VMs on the laptop. Type 'yes' to continue"
+      private: no
+  
   tasks:
-    - name: Confirm destruction
-      pause:
-        prompt: "This will destroy ALL K8s VMs on {{ inventory_hostname }}. Type 'yes' to continue"
-      register: confirm
-
     - name: Check confirmation
       fail:
-        msg: "Destruction cancelled"
-      when: confirm.user_input != "yes"
+        msg: "Destruction cancelled. You must type 'yes' to proceed."
+      when: confirm_destroy != "yes"
 
     - name: Destroy all VMs
       become: yes
       shell: |
+        echo "Destroying Kubernetes cluster VMs..."
         for vm in k8s-control k8s-worker1 k8s-worker2; do
           echo "Destroying $vm..."
           virsh destroy $vm 2>/dev/null || true
           virsh undefine $vm --remove-all-storage 2>/dev/null || true
         done
-      ignore_errors: yes
+        echo "All VMs destroyed"
+      register: destroy_result
 
     - name: Clean up disk images
       become: yes
@@ -38,9 +41,23 @@
         rm -f /tmp/cloud-init-*.yml
       ignore_errors: yes
 
+    - name: Clean up info files
+      shell: |
+        rm -f ~/k8s-vm-info.txt
+        rm -f /tmp/kubeconfig-for-pi
+      ignore_errors: yes
+
     - name: Report status
       debug:
         msg:
-          - "================================"
-          - "All K8s VMs destroyed on laptop!"
-          - "================================"
+          - "======================================="
+          - "Kubernetes cluster destroyed!"
+          - "======================================="
+          - "What was removed:"
+          - "- All 3 VMs (k8s-control, k8s-worker1, k8s-worker2)"
+          - "- All VM disk images"
+          - "- Cloud-init configuration files"
+          - ""
+          - "To create a new cluster from your Pi:"
+          - "ansible-playbook -i laptop-inventory.ini deploy-k8s-cluster.yml"
+          - "======================================="

@@ -1,15 +1,14 @@
 ---
-# deploy-k8s-from-pi.yml - Run this FROM your Raspberry Pi to deploy K8s on laptop
-# This runs the deployment ON the laptop but controlled FROM your Pi
+# deploy-k8s-cluster.yml - Run this FROM your Raspberry Pi to deploy K8s on laptop
+# Usage: ansible-playbook -i laptop-inventory.ini deploy-k8s-cluster.yml
 
 - name: Deploy K8s cluster on laptop from Raspberry Pi
   hosts: laptop
   gather_facts: yes
   
   vars:
-    # Your Raspberry Pi's SSH public key - REPLACE THIS!
-    raspberry_pi_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/EjjlcKFIT5KO3lCefJLxI61ZYL2oQ6Zlr665Y2CKn michaelpsachs@gmail.com
-
+    # YOUR RASPBERRY PI SSH PUBLIC KEY - REPLACE THIS!
+    raspberry_pi_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/EjjlcKFIT5KO3lCefJLxI61ZYL2oQ6Zlr665Y2CKn michaelpsachs@gmail.com"
     
     vm_specs:
       k8s-control:
@@ -32,9 +31,18 @@
     ssh_retries: 60
     ssh_delay: 10
     network_name: default
-    base_image: "/var/lib/libvirt/images/ubuntu-22.04-server-cloudimg-amd64.img"
+    base_image: "/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img"
     
   tasks:
+    - name: Verify Pi SSH key is configured
+      fail:
+        msg: |
+          ERROR: You must add your Raspberry Pi's SSH public key!
+          1. On your Pi, run: cat ~/.ssh/id_rsa.pub
+          2. Copy the entire output
+          3. Replace YOUR_RASPBERRY_PI_SSH_PUBLIC_KEY_HERE in this playbook
+      when: raspberry_pi_ssh_key == "YOUR_RASPBERRY_PI_SSH_PUBLIC_KEY_HERE"
+
     - name: Clean up any existing VMs
       become: yes
       shell: |
@@ -44,12 +52,12 @@
         done
       ignore_errors: yes
 
-    - name: Ensure Ubuntu cloud image exists
-      become: yes
-      get_url:
-        url: https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
-        dest: "{{ base_image }}"
-        mode: '0644'
+    - name: Ensure Ubuntu 24.04 cloud image exists
+  become: yes
+  get_url:
+    url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+    dest: "{{ base_image }}"
+    mode: '0644'
 
     - name: Create cloud-init configurations with Pi SSH key
       copy:
@@ -85,19 +93,23 @@
             - python3
             - python3-pip
             - openssh-server
+            - curl
+            - vim
+            - htop
           
           runcmd:
             - systemctl enable ssh
             - systemctl start ssh
             - systemctl enable qemu-guest-agent
             - systemctl start qemu-guest-agent
+            - touch /var/lib/cloud/instance/boot-finished
             - echo "Cloud-init completed - ready for Pi access" >> /var/log/cloud-init-done.log
           
           growpart:
             mode: auto
             devices: ['/']
           
-          final_message: "VM ready for Raspberry Pi access"
+          final_message: "VM ready for Raspberry Pi SSH access"
       with_dict: "{{ vm_specs }}"
 
     - name: Create cloud-init ISOs
@@ -139,16 +151,18 @@
       delay: 5
       with_dict: "{{ vm_specs }}"
 
+    - name: Wait for DHCP leases
+      become: yes
+      shell: |
+        for i in {1..60}; do
+          count=$(virsh net-dhcp-leases default | grep -c k8s || true)
+          [ "$count" -eq "3" ] && break
+          sleep 5
+        done
+      
     - name: Get VM IPs
       become: yes
       shell: |
-        # Wait for DHCP leases
-        for i in {1..60}; do
-          virsh net-dhcp-leases default | grep -q k8s && break
-          sleep 5
-        done
-        
-        # Get all IPs
         for vm in k8s-control k8s-worker1 k8s-worker2; do
           mac=$(virsh domiflist $vm | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1)
           ip=$(virsh net-dhcp-leases default | grep -i $mac | awk '{print $5}' | cut -d'/' -f1)
@@ -156,7 +170,16 @@
         done
       register: vm_ips
 
-    - name: Save VM info to local file on laptop
+    - name: Wait for SSH to be ready on VMs
+      wait_for:
+        host: "{{ item.split(':')[1] | trim }}"
+        port: 22
+        delay: 10
+        timeout: 300
+      with_items: "{{ vm_ips.stdout_lines }}"
+      when: item | length > 0
+
+    - name: Save VM info to file on laptop
       copy:
         dest: ~/k8s-vm-info.txt
         content: |
@@ -169,19 +192,63 @@
           All VMs have your Raspberry Pi SSH key installed.
           From your Pi, SSH directly to any VM:
             ssh ansible@<ip-address>
+          
+          To destroy these VMs from your Pi:
+            ansible-playbook -i laptop-inventory.ini destroy-k8s-cluster.yml
 
-    - name: Display VM access info for Raspberry Pi
+    - name: Create kubectl config for Pi
+      become: yes
+      shell: |
+        # Get control plane IP
+        control_ip=$(virsh net-dhcp-leases default | grep k8s-control | awk '{print $5}' | cut -d'/' -f1)
+        
+        # Create a basic kubeconfig template
+        cat > /tmp/kubeconfig-for-pi <<EOF
+        apiVersion: v1
+        kind: Config
+        clusters:
+        - cluster:
+            server: https://${control_ip}:6443
+            insecure-skip-tls-verify: true
+          name: k8s-cluster
+        contexts:
+        - context:
+            cluster: k8s-cluster
+            user: admin
+          name: k8s-cluster
+        current-context: k8s-cluster
+        users:
+        - name: admin
+          user:
+            # Will need to be updated after Kubernetes is installed
+            token: YOUR_TOKEN_HERE
+        EOF
+      ignore_errors: yes
+
+    - name: Display success message
       debug:
         msg:
           - "==========================================="
-          - "K8S VMs DEPLOYED ON LAPTOP!"
+          - "K8S VMs DEPLOYED SUCCESSFULLY!"
           - "==========================================="
-          - "VM IPs (SSH from your Raspberry Pi):"
+          - ""
+          - "VM IPs (SSH directly from your Raspberry Pi):"
           - "{{ vm_ips.stdout_lines }}"
           - ""
-          - "From your Raspberry Pi, you can now:"
-          - "  ssh ansible@<vm-ip>"
+          - "FROM YOUR RASPBERRY PI, you can now:"
           - ""
-          - "No need to SSH to laptop!"
-          - "Control everything from your Pi!"
+          - "1. SSH to any VM without password:"
+          - "   ssh ansible@<vm-ip>"
+          - ""
+          - "2. Install Kubernetes on the VMs:"
+          - "   (Use Kubespray or k3s from your Pi)"
+          - ""
+          - "3. Manage VMs:"
+          - "   ansible-playbook -i laptop-inventory.ini manage-k8s-cluster.yml"
+          - ""
+          - "4. Destroy VMs when done:"
+          - "   ansible-playbook -i laptop-inventory.ini destroy-k8s-cluster.yml"
+          - ""
+          - "NO NEED TO SSH TO THE LAPTOP!"
+          - "Everything is controlled from your Pi!"
           - "==========================================="

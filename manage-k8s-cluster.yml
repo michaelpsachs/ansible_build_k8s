@@ -1,0 +1,121 @@
+---
+# manage-k8s-cluster.yml - Run from Pi to manage VMs on laptop
+# Usage: ansible-playbook -i laptop-inventory.ini manage-k8s-cluster.yml --tags [status|ips|start|stop|restart]
+
+- name: Manage K8s VMs on laptop from Raspberry Pi
+  hosts: laptop
+  gather_facts: no
+  
+  tasks:
+    - name: Check VM status
+      become: yes
+      shell: virsh list --all | grep k8s || echo "No K8s VMs found"
+      register: vm_list
+      tags: [always, status]
+
+    - name: Display VM status
+      debug:
+        msg:
+          - "VM Status on laptop:"
+          - "{{ vm_list.stdout_lines }}"
+      tags: [always, status]
+
+    - name: Get VM IPs for Pi access
+      become: yes
+      shell: |
+        echo "=== K8s VM IPs for SSH from Raspberry Pi ==="
+        for vm in k8s-control k8s-worker1 k8s-worker2; do
+          if virsh list --name | grep -q "^${vm}$"; then
+            mac=$(virsh domiflist $vm 2>/dev/null | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1)
+            if [ ! -z "$mac" ]; then
+              ip=$(virsh net-dhcp-leases default | grep -i $mac | awk '{print $5}' | cut -d'/' -f1)
+              [ ! -z "$ip" ] && echo "ssh ansible@$ip  # $vm" || echo "$vm: No IP (may be starting)"
+            else
+              echo "$vm: Not running"
+            fi
+          else
+            echo "$vm: Does not exist"
+          fi
+        done
+      register: vm_ips
+      tags: [ips, status]
+
+    - name: Display SSH commands for Pi
+      debug:
+        msg: "{{ vm_ips.stdout_lines }}"
+      tags: [ips, status]
+
+    - name: Stop all K8s VMs
+      become: yes
+      shell: |
+        echo "Stopping K8s VMs..."
+        for vm in k8s-control k8s-worker1 k8s-worker2; do
+          if virsh list --name | grep -q "^${vm}$"; then
+            virsh shutdown $vm && echo "$vm: Stopping..." || echo "$vm: Failed to stop"
+          else
+            echo "$vm: Not running"
+          fi
+        done
+      register: stop_result
+      tags: [never, stop]
+
+    - name: Display stop results
+      debug:
+        msg: "{{ stop_result.stdout_lines }}"
+      tags: [never, stop]
+
+    - name: Start all K8s VMs
+      become: yes
+      shell: |
+        echo "Starting K8s VMs..."
+        for vm in k8s-control k8s-worker1 k8s-worker2; do
+          if virsh list --all --name | grep -q "^${vm}$"; then
+            virsh start $vm 2>/dev/null && echo "$vm: Starting..." || echo "$vm: Already running"
+          else
+            echo "$vm: Does not exist"
+          fi
+        done
+      register: start_result
+      tags: [never, start]
+
+    - name: Display start results
+      debug:
+        msg: "{{ start_result.stdout_lines }}"
+      tags: [never, start]
+
+    - name: Wait for VMs to get IPs after start
+      pause:
+        seconds: 30
+      tags: [never, start]
+
+    - name: Show IPs after start
+      become: yes
+      shell: |
+        echo "=== VM IPs after start ==="
+        virsh net-dhcp-leases default | grep k8s | awk '{print $6 ": " $5}'
+      register: new_ips
+      tags: [never, start]
+
+    - name: Display new IPs
+      debug:
+        msg: "{{ new_ips.stdout_lines }}"
+      tags: [never, start]
+
+    - name: Restart all K8s VMs
+      become: yes
+      shell: |
+        echo "Restarting K8s VMs..."
+        for vm in k8s-control k8s-worker1 k8s-worker2; do
+          if virsh list --name | grep -q "^${vm}$"; then
+            virsh reboot $vm && echo "$vm: Restarting..." || echo "$vm: Failed to restart"
+          else
+            echo "$vm: Not running"
+          fi
+        done
+      register: restart_result
+      tags: [never, restart]
+
+    - name: Display restart results
+      debug:
+        msg: "{{ restart_result.stdout_lines }}"
+      tags: [never, restart]
