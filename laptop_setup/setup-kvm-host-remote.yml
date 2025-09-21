@@ -1,0 +1,145 @@
+# setup-kvm-host-remote.yml - Run from Raspberry Pi to setup laptop
+# Usage: ansible-playbook -i "laptop-ip," -u your-laptop-username -k -K setup-kvm-host-remote.yml
+# The comma after laptop-ip is important!
+
+- name: Setup KVM/QEMU on remote laptop
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    laptop_user: "{{ ansible_user }}"  # The user you SSH'd in as
+  
+  tasks:
+    - name: Check OS distribution
+      debug:
+        msg: "Detected OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: Install KVM/QEMU packages on Ubuntu/Debian
+      apt:
+        name:
+          - qemu-kvm
+          - libvirt-daemon-system
+          - libvirt-clients
+          - bridge-utils
+          - virtinst
+          - qemu-utils
+          - cloud-image-utils
+          - cpu-checker
+          - virt-manager
+          - python3-libvirt
+          - python3-lxml
+          - ansible  # Make sure ansible is installed on laptop too
+        state: present
+        update_cache: yes
+      when: ansible_distribution in ['Ubuntu', 'Debian']
+
+    - name: Install KVM/QEMU packages on RHEL/CentOS/Fedora
+      dnf:
+        name:
+          - qemu-kvm
+          - libvirt
+          - libvirt-python
+          - virt-install
+          - virt-manager
+          - virt-viewer
+          - bridge-utils
+          - cloud-utils
+          - ansible
+        state: present
+      when: ansible_distribution in ['RedHat', 'CentOS', 'Fedora', 'Rocky', 'AlmaLinux']
+
+    - name: Install KVM/QEMU packages on Arch
+      pacman:
+        name:
+          - qemu-full
+          - libvirt
+          - virt-install
+          - virt-manager
+          - bridge-utils
+          - cloud-image-utils
+          - dnsmasq
+          - ebtables
+          - ansible
+        state: present
+      when: ansible_distribution == 'Archlinux'
+
+    - name: Enable and start libvirtd service
+      systemd:
+        name: libvirtd
+        enabled: yes
+        state: started
+
+    - name: Add laptop user to libvirt and kvm groups
+      user:
+        name: "{{ laptop_user }}"
+        groups: libvirt,kvm
+        append: yes
+
+    - name: Check if KVM acceleration is available
+      command: kvm-ok
+      register: kvm_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display KVM status
+      debug:
+        msg: "{{ kvm_check.stdout_lines | default(['KVM check not available']) }}"
+
+    - name: Check if virtualization is enabled in BIOS
+      shell: |
+        if grep -E '(vmx|svm)' /proc/cpuinfo > /dev/null; then
+          echo "Virtualization is supported by CPU"
+        else
+          echo "WARNING: Virtualization NOT supported or not enabled in BIOS!"
+        fi
+      register: virt_check
+      changed_when: false
+
+    - name: Display virtualization status
+      debug:
+        msg: "{{ virt_check.stdout_lines }}"
+
+    - name: Ensure default network is active
+      shell: |
+        virsh net-list --all | grep -q "default.*active" || virsh net-start default
+        virsh net-autostart default
+      ignore_errors: yes
+
+    - name: Verify all required commands are now available
+      command: which {{ item }}
+      with_items:
+        - virsh
+        - virt-install
+        - qemu-img
+        - cloud-localds
+      register: cmd_check
+      changed_when: false
+
+    - name: Display verification results
+      debug:
+        msg: "✓ {{ item.item }} found at: {{ item.stdout }}"
+      with_items: "{{ cmd_check.results }}"
+
+    - name: Create k8s-ansible directory on laptop
+      file:
+        path: /home/{{ laptop_user }}/k8s-ansible/tasks
+        state: directory
+        owner: "{{ laptop_user }}"
+        group: "{{ laptop_user }}"
+        mode: '0755'
+
+    - name: Important next steps
+      debug:
+        msg:
+          - "======================================="
+          - "KVM/QEMU Setup Complete on {{ inventory_hostname }}!"
+          - "======================================="
+          - "The user '{{ laptop_user }}' needs to log out and back in"
+          - "for group changes to take effect!"
+          - ""
+          - "Next steps:"
+          - "1. SSH to laptop: ssh {{ laptop_user }}@{{ inventory_hostname }}"
+          - "2. Run: newgrp libvirt"
+          - "3. Then deploy: ansible-playbook deploy-k8s-cluster.yml"
+          - "======================================="

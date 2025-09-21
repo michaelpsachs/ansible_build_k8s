@@ -1,9 +1,15 @@
 ---
-# deploy-k8s-cluster.yml - Control from Raspberry Pi
-- name: Complete K8s cluster deployment - VMs + Kubernetes
-  hosts: localhost
+# deploy-k8s-from-pi.yml - Run this FROM your Raspberry Pi to deploy K8s on laptop
+# This runs the deployment ON the laptop but controlled FROM your Pi
+
+- name: Deploy K8s cluster on laptop from Raspberry Pi
+  hosts: laptop
   gather_facts: yes
+  
   vars:
+    # Your Raspberry Pi's SSH public key - REPLACE THIS!
+    raspberry_pi_ssh_key: "ssh-rsa AAAAB3... your-key-here pi@raspberrypi"
+    
     vm_specs:
       k8s-control:
         memory: 4096
@@ -21,56 +27,160 @@
         disk: 20
         role: worker
     
-    # SSH configuration
     ssh_user: ansible
-    ssh_retries: 60  # 60 retries with 10 second delay = 10 minutes
+    ssh_retries: 60
     ssh_delay: 10
-    ssh_timeout: 600  # 10 minutes timeout for SSH operations
-    
-    # Your Raspberry Pi SSH public key - you'll need to paste yours here
-    ssh_public_key_content: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/EjjlcKFIT5KO3lCefJLxI61ZYL2oQ6Zlr665Y2CKn michaelpsachs@gmail.com"
-
-    
-    # Network configuration
     network_name: default
     base_image: "/var/lib/libvirt/images/ubuntu-22.04-server-cloudimg-amd64.img"
     
   tasks:
-    - name: Pre-flight checks
-      block:
-        - name: Ensure required commands are available
-          command: which {{ item }}
-          with_items:
-            - virsh
-            - virt-install
-            - qemu-img
-            - cloud-localds
-            - ssh-keygen
-            - ssh
-          register: cmd_check
-          failed_when: cmd_check.rc != 0
+    - name: Clean up any existing VMs
+      become: yes
+      shell: |
+        for vm in k8s-control k8s-worker1 k8s-worker2; do
+          virsh destroy $vm 2>/dev/null || true
+          virsh undefine $vm --remove-all-storage 2>/dev/null || true
+        done
+      ignore_errors: yes
 
-        - name: Ensure SSH directory exists
-          file:
-            path: ~/.ssh
-            state: directory
-            mode: '0700'
+    - name: Ensure Ubuntu cloud image exists
+      become: yes
+      get_url:
+        url: https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
+        dest: "{{ base_image }}"
+        mode: '0644'
 
-        - name: Check libvirt is running
-          systemd:
-            name: libvirtd
-            state: started
-          become: yes
+    - name: Create cloud-init configurations with Pi SSH key
+      copy:
+        dest: "/tmp/cloud-init-{{ item.key }}.yml"
+        content: |
+          #cloud-config
+          hostname: {{ item.key }}
+          manage_etc_hosts: true
+          
+          users:
+            - name: {{ ssh_user }}
+              groups: [wheel, sudo]
+              sudo: ['ALL=(ALL) NOPASSWD:ALL']
+              shell: /bin/bash
+              lock_passwd: true
+              ssh_authorized_keys:
+                - {{ raspberry_pi_ssh_key }}
+            - name: ubuntu
+              groups: [wheel, sudo]
+              sudo: ['ALL=(ALL) NOPASSWD:ALL']
+              shell: /bin/bash
+              lock_passwd: true
+              ssh_authorized_keys:
+                - {{ raspberry_pi_ssh_key }}
+          
+          ssh_pwauth: false
+          disable_root: false
+          
+          package_update: true
+          package_upgrade: true
+          packages:
+            - qemu-guest-agent
+            - python3
+            - python3-pip
+            - openssh-server
+          
+          runcmd:
+            - systemctl enable ssh
+            - systemctl start ssh
+            - systemctl enable qemu-guest-agent
+            - systemctl start qemu-guest-agent
+            - echo "Cloud-init completed - ready for Pi access" >> /var/log/cloud-init-done.log
+          
+          growpart:
+            mode: auto
+            devices: ['/']
+          
+          final_message: "VM ready for Raspberry Pi access"
+      with_dict: "{{ vm_specs }}"
 
-    - name: Phase 1 - Create VMs with reliable SSH
-      include_tasks: tasks/create-vms-enhanced.yml
+    - name: Create cloud-init ISOs
+      shell: |
+        cloud-localds /tmp/cloud-init-{{ item.key }}.iso /tmp/cloud-init-{{ item.key }}.yml
+      with_dict: "{{ vm_specs }}"
 
-    - name: Phase 2 - Verify SSH connectivity
-      include_tasks: tasks/verify-ssh.yml
+    - name: Create VM disks
+      become: yes
+      shell: |
+        qemu-img create -f qcow2 -b {{ base_image }} -F qcow2 \
+          /var/lib/libvirt/images/{{ item.key }}.qcow2 {{ item.value.disk }}G
+      with_dict: "{{ vm_specs }}"
 
-    - name: Phase 3 - Generate Kubespray inventory
-      include_tasks: tasks/generate-inventory.yml
+    - name: Create VMs
+      become: yes
+      shell: |
+        virt-install \
+          --name {{ item.key }} \
+          --memory {{ item.value.memory }} \
+          --vcpus {{ item.value.vcpus }} \
+          --disk /var/lib/libvirt/images/{{ item.key }}.qcow2,device=disk,bus=virtio \
+          --disk /tmp/cloud-init-{{ item.key }}.iso,device=cdrom \
+          --os-variant ubuntu22.04 \
+          --network network={{ network_name }} \
+          --graphics none \
+          --console pty,target_type=serial \
+          --noautoconsole \
+          --boot hd \
+          --autostart
+      with_dict: "{{ vm_specs }}"
 
-    - name: Phase 4 - Deploy Kubernetes
-      include_tasks: tasks/deploy-kubernetes.yml
-      when: deploy_kubernetes | default(true) | bool
+    - name: Wait for VMs to start
+      become: yes
+      shell: virsh domstate {{ item.key }}
+      register: vm_state
+      until: vm_state.stdout == "running"
+      retries: 10
+      delay: 5
+      with_dict: "{{ vm_specs }}"
+
+    - name: Get VM IPs
+      become: yes
+      shell: |
+        # Wait for DHCP leases
+        for i in {1..60}; do
+          virsh net-dhcp-leases default | grep -q k8s && break
+          sleep 5
+        done
+        
+        # Get all IPs
+        for vm in k8s-control k8s-worker1 k8s-worker2; do
+          mac=$(virsh domiflist $vm | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1)
+          ip=$(virsh net-dhcp-leases default | grep -i $mac | awk '{print $5}' | cut -d'/' -f1)
+          echo "$vm: $ip"
+        done
+      register: vm_ips
+
+    - name: Save VM info to local file on laptop
+      copy:
+        dest: ~/k8s-vm-info.txt
+        content: |
+          Kubernetes VMs - Access from Raspberry Pi
+          ==========================================
+          Created: {{ ansible_date_time.iso8601 }}
+          
+          {{ vm_ips.stdout }}
+          
+          All VMs have your Raspberry Pi SSH key installed.
+          From your Pi, SSH directly to any VM:
+            ssh ansible@<ip-address>
+
+    - name: Display VM access info for Raspberry Pi
+      debug:
+        msg:
+          - "==========================================="
+          - "K8S VMs DEPLOYED ON LAPTOP!"
+          - "==========================================="
+          - "VM IPs (SSH from your Raspberry Pi):"
+          - "{{ vm_ips.stdout_lines }}"
+          - ""
+          - "From your Raspberry Pi, you can now:"
+          - "  ssh ansible@<vm-ip>"
+          - ""
+          - "No need to SSH to laptop!"
+          - "Control everything from your Pi!"
+          - "==========================================="
