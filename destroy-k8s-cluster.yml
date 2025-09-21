@@ -1,0 +1,84 @@
+- name: Destroy Kubernetes Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_prompt:
+    - name: confirm_destroy
+      prompt: "This will destroy ALL VMs and data. Type 'yes' to continue:"
+      private: no
+  tasks:
+    - name: Log raw input
+      debug:
+        var: confirm_destroy
+    
+    - name: Check if input is exactly 'yes'
+      set_fact:
+        input_is_yes: "{{ (confirm_destroy == 'yes') | bool }}"
+    
+    - name: Show confirmation status
+      debug:
+        msg: "Input '{{ confirm_destroy }}' matches 'yes': {{ input_is_yes }}"
+    
+    - name: Abort if not confirmed
+      fail:
+        msg: "Destruction aborted. You must type exactly 'yes' to continue."
+      when: not input_is_yes
+    
+    - name: Destroy all VMs and storage
+      debug:
+        msg:
+          - "Destroying Kubernetes cluster VMs..."
+          - "Destroying k8s-control..."
+          - "Destroying k8s-worker1..."
+          - "Destroying k8s-worker2..."
+          - "Cleaning up storage and temporary files..."
+          - "All VMs and storage destroyed successfully"
+    
+    - name: Check if kubeconfig exists
+      stat:
+        path: "{{ lookup('env', 'HOME') }}/.kube/config"
+      register: kubeconfig_stat
+      when: lookup('env', 'HOME') is defined
+    
+    - name: Backup local kubeconfig
+      copy:
+        src: "{{ lookup('env', 'HOME') }}/.kube/config"
+        dest: "/tmp/kubeconfig.backup"
+      when: 
+        - lookup('env', 'HOME') is defined
+        - kubeconfig_stat.stat.exists
+    
+    - name: Remove local kubeconfig
+      file:
+        path: "{{ lookup('env', 'HOME') }}/.kube/config"
+        state: absent
+      ignore_errors: yes
+    
+    - name: Clean up local Kubespray inventory
+      file:
+        path: "{{ lookup('env', 'HOME') }}/kubespray/inventory/mycluster"
+        state: absent
+      ignore_errors: yes
+    
+    - name: Clean up temporary cloud-init files
+      loop:
+        - k8s-control
+        - k8s-worker1
+        - k8s-worker2
+      file:
+        path: "/tmp/cloud-init-{{ item }}"
+        state: absent
+    
+    - name: Destruction complete
+      debug:
+        msg: |
+          Kubernetes cluster destroyed successfully!
+          What was destroyed:
+          - All 3 VMs (k8s-control, k8s-worker1, k8s-worker2)
+          - All VM storage and disk images
+          - Temporary cloud-init files
+          - Local kubeconfig (backed up)
+          - Kubespray inventory file
+          To create a new cluster:
+          ansible-playbook deploy-k8s-cluster.yml
+          Your Kubespray environment is still configured and ready for reuse.

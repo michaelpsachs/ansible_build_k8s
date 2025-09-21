@@ -1,0 +1,52 @@
+---
+- name: "Deploy Kubernetes cluster with Kubespray"
+  shell: |
+    cd ~/kubespray/kubespray
+    source venv/bin/activate
+    ansible-playbook -i inventory/k8s-cluster/hosts.yml cluster.yml
+  register: kubespray_deployment
+  ignore_errors: yes
+
+- name: "Display Kubespray deployment output (last 50 lines)"
+  debug:
+    msg: "{{ kubespray_deployment.stdout_lines[-50:] }}"
+
+- name: "Display Kubespray deployment errors if any"
+  debug:
+    msg: "{{ kubespray_deployment.stderr_lines }}"
+  when: kubespray_deployment.stderr_lines is defined and kubespray_deployment.stderr_lines | length > 0
+
+- name: "Check deployment status"
+  debug:
+    msg: |
+      Kubespray deployment {% if kubespray_deployment.rc == 0 %}completed successfully{% else %}failed{% endif %}
+      Return code: {{ kubespray_deployment.rc }}
+      Duration: {{ kubespray_deployment.delta }}
+
+- name: "Fail if Kubernetes deployment failed"
+  fail:
+    msg: |
+      Kubernetes deployment failed. Common causes:
+      1. Insufficient VM resources (need 4GB+ RAM for control plane)
+      2. Network connectivity issues during package download
+      3. SSH connectivity problems
+      4. VMs ran out of disk space
+      
+      Check the deployment output above for specific errors.
+      To retry: ansible-playbook deploy-k8s-cluster.yml
+      To destroy and start over: ansible-playbook destroy-k8s-cluster.yml
+  when: kubespray_deployment.rc != 0
+
+- name: "Kubernetes deployment successful"
+  debug:
+    msg: |
+      Kubernetes cluster deployed successfully!
+      
+      Cluster components installed:
+      - Kubernetes v1.28+
+      - Calico CNI networking
+      - CoreDNS
+      - Metrics server
+      - Local path provisioner
+      
+      Next steps in verification phase...

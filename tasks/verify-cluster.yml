@@ -1,0 +1,96 @@
+---
+- name: "Get control plane IP for verification"
+  set_fact:
+    control_ip: "{{ vm_ips['k8s-control'] }}"
+
+- name: "Wait for Kubernetes API to be ready"
+  shell: |
+    ssh -o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no ubuntu@{{ control_ip }} \
+    'kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes --no-headers | wc -l'
+  register: node_count
+  retries: 30
+  delay: 10
+  until: node_count.stdout | int == 3
+  ignore_errors: yes
+
+- name: "Check cluster nodes status"
+  shell: |
+    ssh -o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no ubuntu@{{ control_ip }} \
+    'kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes'
+  register: cluster_nodes
+
+- name: "Display cluster nodes"
+  debug:
+    msg: "{{ cluster_nodes.stdout_lines }}"
+
+- name: "Check system pods"
+  shell: |
+    ssh -o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no ubuntu@{{ control_ip }} \
+    'kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods --all-namespaces'
+  register: system_pods
+
+- name: "Display system pods status"
+  debug:
+    msg: "{{ system_pods.stdout_lines }}"
+
+- name: "Check cluster info"
+  shell: |
+    ssh -o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no ubuntu@{{ control_ip }} \
+    'kubectl --kubeconfig=/etc/kubernetes/admin.conf cluster-info'
+  register: cluster_info
+
+- name: "Display cluster info"
+  debug:
+    msg: "{{ cluster_info.stdout_lines }}"
+
+- name: "Verify all nodes are Ready"
+  shell: |
+    ssh -o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no ubuntu@{{ control_ip }} \
+    'kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes --no-headers | grep -v Ready | wc -l'
+  register: not_ready_nodes
+
+- name: "Check if all nodes are ready"
+  debug:
+    msg: |
+      {% if not_ready_nodes.stdout | int == 0 %}
+      All nodes are Ready
+      {% else %}
+      Warning: {{ not_ready_nodes.stdout }} nodes are not Ready
+      {% endif %}
+
+- name: "Test cluster functionality with test pod"
+  shell: |
+    ssh -o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no ubuntu@{{ control_ip }} '
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf run test-nginx --image=nginx --port=80 --rm -it --restart=Never -- echo "Test successful"
+    '
+  register: test_pod
+  ignore_errors: yes
+
+- name: "Display test pod result"
+  debug:
+    msg: |
+      Test pod result: {% if test_pod.rc == 0 %}SUCCESS{% else %}FAILED{% endif %}
+      {% if test_pod.rc != 0 %}
+      Error: {{ test_pod.stderr }}
+      {% endif %}
+
+- name: "Cluster verification summary"
+  debug:
+    msg: |
+      Kubernetes Cluster Verification Summary:
+      ========================================
+      
+      Control Plane: {{ control_ip }}
+      Workers: {{ vm_ips['k8s-worker1'] }}, {{ vm_ips['k8s-worker2'] }}
+      
+      Status: {% if not_ready_nodes.stdout | int == 0 and test_pod.rc == 0 %}HEALTHY{% else %}NEEDS ATTENTION{% endif %}
+      
+      {% if not_ready_nodes.stdout | int == 0 and test_pod.rc == 0 %}
+      Your cluster is ready for workloads!
+      
+      Next steps:
+      1. Get kubeconfig: ansible-playbook get-kubeconfig.yml
+      2. Deploy applications: kubectl apply -f your-manifests.yaml
+      {% else %}
+      Some issues detected. Check the output above for details.
+      {% endif %}

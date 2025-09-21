@@ -1,0 +1,57 @@
+---
+- name: "Test SSH connectivity to VMs"
+  shell: |
+    ssh {{ kvm_user }}@{{ kvm_host }} "
+    echo 'Testing SSH connectivity to VMs...'
+    for vm in k8s-control k8s-worker1 k8s-worker2; do
+      ip=\$(sudo virsh domifaddr \$vm | grep -E '192\.168\.' | awk '{print \$4}' | cut -d'/' -f1)
+      if [ ! -z \"\$ip\" ]; then
+        echo \"Testing \$vm at \$ip...\"
+        # Test SSH key access first
+        if ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@\$ip 'echo SSH_KEY_SUCCESS' 2>/dev/null; then
+          echo \"✅ SSH key access works for \$vm\"
+        else
+          echo \"⚠️ SSH key failed, testing password for \$vm...\"
+          if sshpass -p ubuntu ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@\$ip 'echo SSH_PASSWORD_SUCCESS' 2>/dev/null; then
+            echo \"✅ SSH password access works for \$vm\"
+          else
+            echo \"❌ Both SSH methods failed for \$vm\"
+          fi
+        fi
+      else
+        echo \"❌ No IP found for \$vm\"
+      fi
+    done"
+  register: ssh_test_results
+
+- name: "Display SSH connectivity test results"
+  debug:
+    msg: "{{ ssh_test_results.stdout_lines }}"
+
+- name: "Test Ansible connectivity using Kubespray inventory"
+  shell: |
+    cd ~/kubespray/kubespray
+    source venv/bin/activate
+    ansible all -i inventory/k8s-cluster/hosts.yml -m ping
+  register: ansible_connectivity_test
+  ignore_errors: yes
+
+- name: "Display Ansible connectivity results"
+  debug:
+    msg: "{{ ansible_connectivity_test.stdout_lines | default(['No output']) }}"
+
+- name: "Fail if connectivity test failed"
+  fail:
+    msg: |
+      Connectivity test failed. Common issues:
+      1. VMs still booting - wait a few minutes and retry
+      2. SSH keys not properly configured
+      3. Network connectivity issues
+      
+      Try manual SSH test:
+      ssh -o ProxyJump={{ kvm_user }}@{{ kvm_host }} ubuntu@<VM_IP>
+  when: ansible_connectivity_test.rc != 0
+
+- name: "Connectivity test passed"
+  debug:
+    msg: "All VMs are accessible via SSH. Ready for Kubernetes deployment."

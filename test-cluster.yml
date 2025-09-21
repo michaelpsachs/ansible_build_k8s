@@ -1,0 +1,144 @@
+---
+- name: "Test Kubernetes cluster functionality"
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+    - name: "Test basic cluster connectivity"
+      shell: kubectl get nodes
+      register: nodes_test
+      ignore_errors: yes
+
+    - name: "Check if kubectl is working"
+      fail:
+        msg: |
+          Cannot connect to cluster. Run this first:
+          ansible-playbook get-kubeconfig.yml
+      when: nodes_test.rc != 0
+
+    - name: "Display cluster nodes"
+      debug:
+        msg: "{{ nodes_test.stdout_lines }}"
+
+    - name: "Check all nodes are Ready"
+      shell: kubectl get nodes --no-headers | grep -v Ready | wc -l
+      register: not_ready_nodes
+
+    - name: "Node readiness status"
+      debug:
+        msg: |
+          {% if not_ready_nodes.stdout | int == 0 %}
+          All nodes are Ready
+          {% else %}
+          Warning: {{ not_ready_nodes.stdout }} nodes are not Ready
+          {% endif %}
+
+    - name: "Check system pods status"
+      shell: kubectl get pods --all-namespaces
+      register: system_pods
+
+    - name: "Display system pods"
+      debug:
+        msg: "{{ system_pods.stdout_lines }}"
+
+    - name: "Check for failing pods"
+      shell: kubectl get pods --all-namespaces --field-selector=status.phase!=Running,status.phase!=Succeeded | wc -l
+      register: failing_pods
+
+    - name: "System pods status"
+      debug:
+        msg: |
+          {% if failing_pods.stdout | int <= 1 %}
+          All system pods are healthy
+          {% else %}
+          Warning: {{ (failing_pods.stdout | int) - 1 }} pods are not running properly
+          {% endif %}
+
+    - name: "Deploy test nginx pod"
+      shell: kubectl run test-nginx --image=nginx --port=80
+      register: test_pod_deploy
+      ignore_errors: yes
+
+    - name: "Wait for test pod to be ready"
+      shell: kubectl wait --for=condition=ready pod/test-nginx --timeout=300s
+      register: test_pod_ready
+      ignore_errors: yes
+
+    - name: "Check test pod status"
+      shell: kubectl get pod test-nginx
+      register: test_pod_status
+      when: test_pod_deploy.rc == 0
+
+    - name: "Test pod networking"
+      shell: kubectl exec test-nginx -- curl -s http://localhost:80 | head -1
+      register: test_networking
+      ignore_errors: yes
+      when: test_pod_ready.rc == 0
+
+    - name: "Clean up test pod"
+      shell: kubectl delete pod test-nginx
+      ignore_errors: yes
+      when: test_pod_deploy.rc == 0
+
+    - name: "Test persistent volume functionality"
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: test-pvc
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+        EOF
+      register: pvc_test
+      ignore_errors: yes
+
+    - name: "Wait for PVC to be bound"
+      shell: kubectl get pvc test-pvc -o jsonpath='{.status.phase}'
+      register: pvc_status
+      retries: 30
+      delay: 2
+      until: pvc_status.stdout == "Bound"
+      ignore_errors: yes
+      when: pvc_test.rc == 0
+
+    - name: "Clean up test PVC"
+      shell: kubectl delete pvc test-pvc
+      ignore_errors: yes
+      when: pvc_test.rc == 0
+
+    - name: "Test DNS resolution"
+      shell: |
+        kubectl run test-dns --image=busybox --rm -it --restart=Never -- nslookup kubernetes.default.svc.cluster.local
+      register: dns_test
+      ignore_errors: yes
+
+    - name: "Cluster test summary"
+      debug:
+        msg: |
+          Kubernetes Cluster Test Results:
+          ================================
+          
+          Node Status: {% if not_ready_nodes.stdout | int == 0 %}PASS{% else %}FAIL{% endif %}
+          System Pods: {% if failing_pods.stdout | int <= 1 %}PASS{% else %}FAIL{% endif %}
+          Test Pod Deployment: {% if test_pod_deploy.rc == 0 %}PASS{% else %}FAIL{% endif %}
+          Pod Networking: {% if test_networking.rc == 0 %}PASS{% else %}FAIL{% endif %}
+          Persistent Storage: {% if pvc_status.stdout == "Bound" %}PASS{% else %}FAIL{% endif %}
+          DNS Resolution: {% if dns_test.rc == 0 %}PASS{% else %}FAIL{% endif %}
+          
+          {% if not_ready_nodes.stdout | int == 0 and failing_pods.stdout | int <= 1 and test_pod_deploy.rc == 0 %}
+          Overall Status: HEALTHY - Your cluster is ready for production workloads!
+          {% else %}
+          Overall Status: NEEDS ATTENTION - Check failed tests above
+          {% endif %}
+          
+          Cluster Info:
+          - Nodes: {{ nodes_test.stdout_lines | length }}
+          - Ready Nodes: {{ 3 - (not_ready_nodes.stdout | int) }}
+          - Kubectl Access: Working
+          - Storage: {% if pvc_status.stdout == "Bound" %}Working{% else %}Check storage classes{% endif %}

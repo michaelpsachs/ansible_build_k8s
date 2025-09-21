@@ -1,0 +1,151 @@
+---
+- name: "Clean up any existing VMs"
+  shell: |
+    ssh {{ kvm_user }}@{{ kvm_host }} '
+    for vm in k8s-control k8s-worker1 k8s-worker2; do
+      sudo virsh destroy $vm 2>/dev/null || true
+      sudo virsh undefine $vm --remove-all-storage 2>/dev/null || true
+    done
+    sudo rm -f /var/lib/libvirt/images/k8s-*
+    echo "Cleanup complete"'
+
+- name: "Ensure Ubuntu cloud image exists"
+  shell: |
+    ssh {{ kvm_user }}@{{ kvm_host }} '
+    if [ ! -f /var/lib/libvirt/images/ubuntu-base.img ]; then
+      wget -O ~/ubuntu-base.img \
+      http://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
+      sudo mv ~/ubuntu-base.img /var/lib/libvirt/images/ubuntu-base.img
+      sudo chown libvirt-qemu:libvirt-qemu /var/lib/libvirt/images/ubuntu-base.img
+    fi'
+
+- name: "Create reliable cloud-init files"
+  copy:
+    content: |
+      #cloud-config
+      users:
+        - name: ubuntu
+          plain_text_passwd: ubuntu
+          lock_passwd: false
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
+          ssh_authorized_keys:
+            - {{ ssh_key }}
+        - name: root
+          lock_passwd: false
+          ssh_authorized_keys:
+            - {{ ssh_key }}
+      
+      chpasswd:
+        expire: false
+        users:
+          - name: ubuntu
+            password: ubuntu
+            type: text
+          - name: root
+            password: ubuntu
+            type: text
+      
+      ssh_pwauth: true
+      disable_root: false
+      
+      package_update: true
+      packages:
+        - openssh-server
+        - curl
+        - wget
+        - net-tools
+        - apt-transport-https
+        - ca-certificates
+        - gnupg
+        - lsb-release
+      
+      write_files:
+        - path: /etc/ssh/sshd_config.d/99-k8s.conf
+          content: |
+            PasswordAuthentication yes
+            PubkeyAuthentication yes
+            PermitRootLogin yes
+          permissions: '0644'
+      
+      runcmd:
+        - mkdir -p /home/ubuntu/.ssh /root/.ssh
+        - chmod 700 /home/ubuntu/.ssh /root/.ssh
+        - echo "{{ ssh_key }}" > /home/ubuntu/.ssh/authorized_keys
+        - echo "{{ ssh_key }}" > /root/.ssh/authorized_keys
+        - chmod 600 /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
+        - chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+        - chown root:root /root/.ssh/authorized_keys
+        - echo 'ubuntu:ubuntu' | chpasswd
+        - echo 'root:ubuntu' | chpasswd
+        - systemctl enable ssh
+        - systemctl restart ssh
+        - systemctl status ssh
+        - echo "{{ item.key }} VM ready" > /var/log/vm-ready.log
+      
+      final_message: "{{ item.key }} VM ready with ubuntu/ubuntu and SSH keys"
+    dest: "/tmp/{{ item.key }}-userdata"
+  loop: "{{ cluster_vms | dict2items }}"
+
+- name: "Create cloud-init ISOs"
+  shell: |
+    scp /tmp/{{ item.key }}-userdata {{ kvm_user }}@{{ kvm_host }}:/tmp/
+    ssh {{ kvm_user }}@{{ kvm_host }} '
+    cat > /tmp/{{ item.key }}-metadata << "EOF"
+    instance-id: {{ item.key }}-$(date +%s)
+    local-hostname: {{ item.key }}
+    EOF
+    sudo genisoimage -output /var/lib/libvirt/images/{{ item.key }}-cidata.iso \
+    -volid cidata -joliet -rock \
+    /tmp/{{ item.key }}-userdata /tmp/{{ item.key }}-metadata'
+  loop: "{{ cluster_vms | dict2items }}"
+
+- name: "Create VM disks"
+  shell: |
+    ssh {{ kvm_user }}@{{ kvm_host }} '
+    sudo qemu-img create -f qcow2 -F qcow2 \
+    -b /var/lib/libvirt/images/ubuntu-base.img \
+    /var/lib/libvirt/images/{{ item.key }}.qcow2 {{ item.value.disk }}G'
+  loop: "{{ cluster_vms | dict2items }}"
+
+- name: "Create VMs with cloud-init"
+  shell: |
+    ssh {{ kvm_user }}@{{ kvm_host }} '
+    sudo virt-install \
+    --name {{ item.key }} \
+    --memory {{ item.value.memory }} \
+    --vcpus {{ item.value.vcpus }} \
+    --disk path=/var/lib/libvirt/images/{{ item.key }}.qcow2 \
+    --disk path=/var/lib/libvirt/images/{{ item.key }}-cidata.iso,device=cdrom \
+    --os-variant ubuntu22.04 \
+    --network network=default \
+    --graphics none \
+    --noautoconsole \
+    --import'
+  loop: "{{ cluster_vms | dict2items }}"
+
+- name: "Wait for VMs to boot and configure"
+  pause:
+    seconds: 90
+    prompt: "Waiting for VMs to boot and cloud-init to complete..."
+
+- name: "Verify VMs are running"
+  shell: |
+    ssh {{ kvm_user }}@{{ kvm_host }} "
+    echo 'VM Status:'
+    sudo virsh list --all | grep k8s-
+    echo ''
+    echo 'VM IPs:'
+    for vm in k8s-control k8s-worker1 k8s-worker2; do
+      ip=\$(sudo virsh domifaddr \$vm | grep -E '192\.168\.' | awk '{print \$4}' | cut -d'/' -f1)
+      if [ ! -z \"\$ip\" ]; then
+        echo \"\$vm: \$ip\"
+      else
+        echo \"\$vm: NO_IP (still booting)\"
+      fi
+    done"
+  register: vm_status
+
+- name: "Display VM creation results"
+  debug:
+    msg: "{{ vm_status.stdout_lines }}"

@@ -1,0 +1,92 @@
+---
+- name: "Create Kubespray inventory with working IPs"
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    kvm_host: "192.168.1.99"
+    kvm_user: "mike"
+
+  tasks:
+    - name: "Create Kubespray inventory directory"
+      file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "~/kubespray/inventory/mycluster"
+        - "~/kubespray/inventory/mycluster/group_vars"
+        - "~/kubespray/inventory/mycluster/group_vars/all"
+        - "~/kubespray/inventory/mycluster/group_vars/k8s_cluster"
+
+    - name: "Create inventory file"
+      copy:
+        content: |
+          all:
+            hosts:
+              k8s-control:
+                ansible_host: 192.168.122.98
+                ansible_user: ubuntu
+                ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+                ip: 192.168.122.98
+                access_ip: 192.168.122.98
+              k8s-worker1:
+                ansible_host: 192.168.122.138
+                ansible_user: ubuntu
+                ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+                ip: 192.168.122.138
+                access_ip: 192.168.122.138
+              k8s-worker2:
+                ansible_host: 192.168.122.211
+                ansible_user: ubuntu
+                ansible_ssh_common_args: '-o ProxyJump={{ kvm_user }}@{{ kvm_host }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+                ip: 192.168.122.211
+                access_ip: 192.168.122.211
+            children:
+              kube_control_plane:
+                hosts:
+                  k8s-control:
+              kube_node:
+                hosts:
+                  k8s-worker1:
+                  k8s-worker2:
+              etcd:
+                hosts:
+                  k8s-control:
+              k8s_cluster:
+                children:
+                  kube_control_plane:
+                  kube_node:
+              calico_rr:
+                hosts: {}
+        dest: "~/kubespray/inventory/mycluster/hosts.yml"
+
+    - name: "Test Ansible connectivity"
+      shell: |
+        cd ~/kubespray
+        source venv/bin/activate 2>/dev/null || python3 -m venv venv && source venv/bin/activate
+        ansible -i inventory/mycluster/hosts.yml all -m ping
+      register: ping_test
+      ignore_errors: yes
+
+    - name: "Show connectivity results"
+      debug:
+        msg: "{{ ping_test.stdout_lines }}"
+      when: ping_test.stdout_lines is defined
+
+    - name: "Next steps"
+      debug:
+        msg: |
+          If all pings are successful, run Kubespray:
+          
+          cd ~/kubespray
+          source venv/bin/activate
+          
+          # Run the deployment (takes 15-30 minutes)
+          ansible-playbook -i inventory/mycluster/hosts.yml cluster.yml -b
+          
+          After deployment, get kubeconfig:
+          ansible -i inventory/mycluster/hosts.yml k8s-control -m fetch \
+            -a "src=/etc/kubernetes/admin.conf dest=./kubeconfig flat=yes" -b
+          
+          export KUBECONFIG=~/kubespray/kubeconfig
+          kubectl get nodes
