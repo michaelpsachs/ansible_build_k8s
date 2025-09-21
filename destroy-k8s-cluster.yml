@@ -1,84 +1,396 @@
-- name: Destroy Kubernetes Cluster
+---
+# deploy-k8s-cluster.yml - Enhanced version with robust SSH handling
+- name: Complete K8s cluster deployment - VMs + Kubernetes
   hosts: localhost
-  connection: local
-  gather_facts: no
-  vars_prompt:
-    - name: confirm_destroy
-      prompt: "This will destroy ALL VMs and data. Type 'yes' to continue:"
-      private: no
+  gather_facts: yes
+  vars:
+    vm_specs:
+      k8s-control:
+        memory: 4096
+        vcpus: 2
+        disk: 30
+        role: control
+      k8s-worker1:
+        memory: 4096
+        vcpus: 2
+        disk: 20
+        role: worker
+      k8s-worker2:
+        memory: 4096
+        vcpus: 2
+        disk: 20
+        role: worker
+    
+    # SSH configuration
+    ssh_user: ansible
+    ssh_retries: 60  # 60 retries with 10 second delay = 10 minutes
+    ssh_delay: 10
+    ssh_timeout: 600  # 10 minutes timeout for SSH operations
+    
+    # Network configuration
+    network_name: default
+    base_image: "/var/lib/libvirt/images/ubuntu-22.04-server-cloudimg-amd64.img"
+    
   tasks:
-    - name: Log raw input
-      debug:
-        var: confirm_destroy
-    
-    - name: Check if input is exactly 'yes'
-      set_fact:
-        input_is_yes: "{{ (confirm_destroy == 'yes') | bool }}"
-    
-    - name: Show confirmation status
-      debug:
-        msg: "Input '{{ confirm_destroy }}' matches 'yes': {{ input_is_yes }}"
-    
-    - name: Abort if not confirmed
-      fail:
-        msg: "Destruction aborted. You must type exactly 'yes' to continue."
-      when: not input_is_yes
-    
-    - name: Destroy all VMs and storage
-      debug:
-        msg:
-          - "Destroying Kubernetes cluster VMs..."
-          - "Destroying k8s-control..."
-          - "Destroying k8s-worker1..."
-          - "Destroying k8s-worker2..."
-          - "Cleaning up storage and temporary files..."
-          - "All VMs and storage destroyed successfully"
-    
-    - name: Check if kubeconfig exists
-      stat:
-        path: "{{ lookup('env', 'HOME') }}/.kube/config"
-      register: kubeconfig_stat
-      when: lookup('env', 'HOME') is defined
-    
-    - name: Backup local kubeconfig
-      copy:
-        src: "{{ lookup('env', 'HOME') }}/.kube/config"
-        dest: "/tmp/kubeconfig.backup"
-      when: 
-        - lookup('env', 'HOME') is defined
-        - kubeconfig_stat.stat.exists
-    
-    - name: Remove local kubeconfig
-      file:
-        path: "{{ lookup('env', 'HOME') }}/.kube/config"
-        state: absent
-      ignore_errors: yes
-    
-    - name: Clean up local Kubespray inventory
-      file:
-        path: "{{ lookup('env', 'HOME') }}/kubespray/inventory/mycluster"
-        state: absent
-      ignore_errors: yes
-    
-    - name: Clean up temporary cloud-init files
-      loop:
-        - k8s-control
-        - k8s-worker1
-        - k8s-worker2
-      file:
-        path: "/tmp/cloud-init-{{ item }}"
-        state: absent
-    
-    - name: Destruction complete
-      debug:
-        msg: |
-          Kubernetes cluster destroyed successfully!
-          What was destroyed:
-          - All 3 VMs (k8s-control, k8s-worker1, k8s-worker2)
-          - All VM storage and disk images
-          - Temporary cloud-init files
-          - Local kubeconfig (backed up)
-          - Kubespray inventory file
-          To create a new cluster:
-          ansible-playbook deploy-k8s-cluster.yml
-          Your Kubespray environment is still configured and ready for reuse.
+    - name: Phase 1 - Create VMs with reliable SSH
+      include_tasks: tasks/create-vms-enhanced.yml
+
+    - name: Phase 2 - Verify SSH connectivity
+      include_tasks: tasks/verify-ssh.yml
+
+    - name: Phase 3 - Generate Kubespray inventory
+      include_tasks: tasks/generate-inventory.yml
+
+    - name: Phase 4 - Deploy Kubernetes
+      include_tasks: tasks/deploy-kubernetes.yml
+
+---
+# tasks/create-vms-enhanced.yml
+- name: Clean up any existing VMs
+  shell: |
+    for vm in k8s-control k8s-worker1 k8s-worker2; do
+      virsh destroy $vm 2>/dev/null || true
+      virsh undefine $vm --remove-all-storage 2>/dev/null || true
+    done
+  ignore_errors: yes
+
+- name: Ensure Ubuntu cloud image exists
+  get_url:
+    url: https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
+    dest: "{{ base_image }}"
+    mode: '0644'
+  become: yes
+
+- name: Generate SSH key pair for Ansible
+  openssh_keypair:
+    path: ~/.ssh/ansible_k8s
+    type: rsa
+    size: 4096
+    state: present
+    force: no
+
+- name: Read public key
+  slurp:
+    src: ~/.ssh/ansible_k8s.pub
+  register: ssh_public_key
+
+- name: Create enhanced cloud-init configurations
+  copy:
+    dest: "/tmp/cloud-init-{{ item.key }}.yml"
+    content: |
+      #cloud-config
+      hostname: {{ item.key }}
+      manage_etc_hosts: true
+      
+      # User configuration
+      users:
+        - name: {{ ssh_user }}
+          groups: [wheel, sudo]
+          sudo: ['ALL=(ALL) NOPASSWD:ALL']
+          shell: /bin/bash
+          lock_passwd: false
+          passwd: $6$rounds=4096$8AHZp$3YwL5Fm3r8fVwJ6H1N3Qm.VzY3Z9XjLmS7Lqw8Z5zJ5wL
+          ssh_authorized_keys:
+            - {{ ssh_public_key.content | b64decode | trim }}
+      
+      # Disable SSH password authentication for security
+      ssh_pwauth: false
+      disable_root: false
+      
+      # Package management
+      package_update: true
+      package_upgrade: true
+      packages:
+        - qemu-guest-agent
+        - python3
+        - python3-pip
+        - curl
+        - vim
+        - net-tools
+        - openssh-server
+      
+      # Ensure SSH is started and enabled
+      runcmd:
+        - systemctl enable ssh
+        - systemctl start ssh
+        - systemctl enable qemu-guest-agent
+        - systemctl start qemu-guest-agent
+        - touch /var/lib/cloud/instance/boot-finished
+        - echo "Cloud-init completed at $(date)" >> /var/log/cloud-init-done.log
+      
+      # Speed up boot
+      growpart:
+        mode: auto
+        devices: ['/']
+      
+      # Final message
+      final_message: "Cloud-init completed in $UPTIME seconds"
+      
+  with_dict: "{{ vm_specs }}"
+
+- name: Create cloud-init ISOs
+  shell: |
+    cloud-localds /tmp/cloud-init-{{ item.key }}.iso /tmp/cloud-init-{{ item.key }}.yml
+  with_dict: "{{ vm_specs }}"
+
+- name: Create VM disks
+  shell: |
+    qemu-img create -f qcow2 -b {{ base_image }} -F qcow2 \
+      /var/lib/libvirt/images/{{ item.key }}.qcow2 {{ item.value.disk }}G
+  become: yes
+  with_dict: "{{ vm_specs }}"
+
+- name: Create VMs with cloud-init
+  shell: |
+    virt-install \
+      --name {{ item.key }} \
+      --memory {{ item.value.memory }} \
+      --vcpus {{ item.value.vcpus }} \
+      --disk /var/lib/libvirt/images/{{ item.key }}.qcow2,device=disk,bus=virtio \
+      --disk /tmp/cloud-init-{{ item.key }}.iso,device=cdrom \
+      --os-variant ubuntu22.04 \
+      --network network={{ network_name }} \
+      --graphics none \
+      --console pty,target_type=serial \
+      --noautoconsole \
+      --boot hd \
+      --autostart
+  become: yes
+  with_dict: "{{ vm_specs }}"
+
+- name: Wait for VMs to be running
+  shell: virsh domstate {{ item.key }}
+  register: vm_state
+  until: vm_state.stdout == "running"
+  retries: 10
+  delay: 5
+  with_dict: "{{ vm_specs }}"
+
+- name: Get VM MAC addresses
+  shell: |
+    virsh domiflist {{ item.key }} | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1
+  register: mac_addresses
+  with_dict: "{{ vm_specs }}"
+
+- name: Wait for DHCP lease (10 minute timeout)
+  shell: |
+    virsh net-dhcp-leases {{ network_name }} | grep -i {{ item.stdout }} | awk '{print $5}' | cut -d'/' -f1
+  register: vm_ips
+  until: vm_ips.stdout != ""
+  retries: 60  # 60 retries * 10 seconds = 10 minutes
+  delay: 10
+  with_items: "{{ mac_addresses.results }}"
+
+- name: Store VM IPs in facts
+  set_fact:
+    vm_ip_addresses: |
+      {% set ips = {} %}
+      {% for i in range(mac_addresses.results | length) %}
+      {% set _ = ips.update({mac_addresses.results[i].item.key: vm_ips.results[i].stdout}) %}
+      {% endfor %}
+      {{ ips }}
+
+- name: Display VM information
+  debug:
+    msg:
+      - "VM Created: {{ item.key }}"
+      - "IP Address: {{ item.value }}"
+  with_dict: "{{ vm_ip_addresses }}"
+
+---
+# tasks/verify-ssh.yml
+- name: Wait for SSH port to be open (10 minute timeout)
+  wait_for:
+    host: "{{ item.value }}"
+    port: 22
+    delay: 10
+    timeout: 600  # 10 minutes
+    state: started
+  with_dict: "{{ vm_ip_addresses }}"
+
+- name: Wait for cloud-init to complete (10 minute timeout)
+  shell: |
+    ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        -i ~/.ssh/ansible_k8s \
+        {{ ssh_user }}@{{ item.value }} \
+        "sudo cloud-init status --wait && echo 'Cloud-init completed'"
+  register: cloud_init_status
+  until: cloud_init_status.rc == 0
+  retries: "{{ ssh_retries }}"  # 60 retries
+  delay: "{{ ssh_delay }}"       # 10 seconds each = 10 minutes total
+  with_dict: "{{ vm_ip_addresses }}"
+
+- name: Verify SSH connectivity with ansible ping
+  shell: |
+    ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -i ~/.ssh/ansible_k8s \
+        {{ ssh_user }}@{{ item.value }} \
+        "echo 'SSH connection successful'"
+  register: ssh_test
+  until: ssh_test.rc == 0
+  retries: 5
+  delay: 5
+  with_dict: "{{ vm_ip_addresses }}"
+
+- name: Configure SSH for smoother Ansible operations
+  shell: |
+    ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -i ~/.ssh/ansible_k8s \
+        {{ ssh_user }}@{{ item.value }} \
+        "sudo sed -i 's/#MaxSessions.*/MaxSessions 100/' /etc/ssh/sshd_config && \
+         sudo sed -i 's/#MaxStartups.*/MaxStartups 100:30:200/' /etc/ssh/sshd_config && \
+         sudo systemctl reload sshd"
+  with_dict: "{{ vm_ip_addresses }}"
+  ignore_errors: yes
+
+- name: Add VMs to known_hosts
+  known_hosts:
+    name: "{{ item.value }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -t rsa ' + item.value) }}"
+    state: present
+  with_dict: "{{ vm_ip_addresses }}"
+
+---
+# tasks/generate-inventory.yml
+- name: Create Kubespray inventory directory
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  with_items:
+    - ~/kubespray/inventory/mycluster
+    - ~/kubespray/inventory/mycluster/group_vars
+    - ~/kubespray/inventory/mycluster/group_vars/all
+    - ~/kubespray/inventory/mycluster/group_vars/k8s_cluster
+
+- name: Generate Kubespray inventory with proper SSH config
+  copy:
+    dest: ~/kubespray/inventory/mycluster/hosts.yml
+    content: |
+      all:
+        hosts:
+          k8s-control:
+            ansible_host: {{ vm_ip_addresses['k8s-control'] }}
+            ansible_user: {{ ssh_user }}
+            ansible_ssh_private_key_file: ~/.ssh/ansible_k8s
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+            ip: {{ vm_ip_addresses['k8s-control'] }}
+            access_ip: {{ vm_ip_addresses['k8s-control'] }}
+          k8s-worker1:
+            ansible_host: {{ vm_ip_addresses['k8s-worker1'] }}
+            ansible_user: {{ ssh_user }}
+            ansible_ssh_private_key_file: ~/.ssh/ansible_k8s
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+            ip: {{ vm_ip_addresses['k8s-worker1'] }}
+            access_ip: {{ vm_ip_addresses['k8s-worker1'] }}
+          k8s-worker2:
+            ansible_host: {{ vm_ip_addresses['k8s-worker2'] }}
+            ansible_user: {{ ssh_user }}
+            ansible_ssh_private_key_file: ~/.ssh/ansible_k8s
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+            ip: {{ vm_ip_addresses['k8s-worker2'] }}
+            access_ip: {{ vm_ip_addresses['k8s-worker2'] }}
+        children:
+          kube_control_plane:
+            hosts:
+              k8s-control:
+          kube_node:
+            hosts:
+              k8s-worker1:
+              k8s-worker2:
+          etcd:
+            hosts:
+              k8s-control:
+          k8s_cluster:
+            children:
+              kube_control_plane:
+              kube_node:
+          calico_rr:
+            hosts: {}
+
+- name: Configure Kubespray variables
+  copy:
+    dest: ~/kubespray/inventory/mycluster/group_vars/all/all.yml
+    content: |
+      ---
+      # Ansible settings
+      ansible_user: {{ ssh_user }}
+      ansible_ssh_private_key_file: ~/.ssh/ansible_k8s
+      ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+      ansible_become: yes
+      ansible_become_method: sudo
+      
+      # Networking
+      kube_network_plugin: calico
+      kube_network_plugin_multus: false
+      kube_service_addresses: 10.233.0.0/18
+      kube_pods_subnet: 10.233.64.0/18
+      
+      # DNS
+      cluster_name: cluster.local
+      ndots: 2
+      dns_mode: coredns
+      
+      # Other settings
+      kubeconfig_localhost: true
+      kubectl_localhost: true
+      helm_enabled: true
+      metrics_server_enabled: true
+      ingress_nginx_enabled: true
+
+- name: Test Ansible connectivity with Kubespray inventory (10 minute timeout)
+  shell: |
+    cd ~/kubespray
+    source venv/bin/activate 2>/dev/null || (python3 -m venv venv && source venv/bin/activate)
+    ansible -i inventory/mycluster/hosts.yml all -m ping
+  register: ansible_ping
+  retries: 60  # 60 retries * 10 seconds = 10 minutes
+  delay: 10
+  until: ansible_ping.rc == 0
+
+- name: Display connectivity test results
+  debug:
+    var: ansible_ping.stdout_lines
+
+---
+# tasks/deploy-kubernetes.yml
+- name: Run Kubespray cluster deployment
+  shell: |
+    cd ~/kubespray
+    source venv/bin/activate
+    ansible-playbook -i inventory/mycluster/hosts.yml \
+      --become --become-user=root \
+      cluster.yml \
+      -e "ansible_ssh_pipelining=true" \
+      -e "ansible_ssh_extra_args='-o ControlMaster=auto -o ControlPersist=30m'" \
+      -v
+  async: 3600  # 1 hour timeout
+  poll: 30     # Check every 30 seconds
+  register: kubespray_result
+
+- name: Display Kubespray deployment result
+  debug:
+    msg: "Kubernetes cluster deployed successfully!"
+  when: kubespray_result.rc == 0
+
+- name: Configure kubectl for local access
+  shell: |
+    mkdir -p ~/.kube
+    sudo cp /root/.kube/config ~/.kube/config 2>/dev/null || \
+    scp -i ~/.ssh/ansible_k8s {{ ssh_user }}@{{ vm_ip_addresses['k8s-control'] }}:/home/{{ ssh_user }}/.kube/config ~/.kube/config
+    sudo chown $(id -u):$(id -g) ~/.kube/config
+    chmod 600 ~/.kube/config
+
+- name: Verify cluster is working
+  shell: |
+    kubectl get nodes
+    kubectl get pods --all-namespaces
+  register: cluster_status
+
+- name: Display cluster status
+  debug:
+    var: cluster_status.stdout_lines
