@@ -8,7 +8,8 @@
   
   vars:
     # Your Raspberry Pi's SSH public key - REPLACE THIS!
-    raspberry_pi_ssh_key: "ssh-rsa AAAAB3... your-key-here pi@raspberrypi"
+    raspberry_pi_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/EjjlcKFIT5KO3lCefJLxI61ZYL2oQ6Zlr665Y2CKn michaelpsachs@gmail.com
+
     
     vm_specs:
       k8s-control:
