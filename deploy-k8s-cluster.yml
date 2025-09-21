@@ -60,57 +60,58 @@
     mode: '0644'
 
     - name: Create cloud-init configurations with Pi SSH key
-      copy:
-        dest: "/tmp/cloud-init-{{ item.key }}.yml"
-        content: |
-          #cloud-config
-          hostname: {{ item.key }}
-          manage_etc_hosts: true
-          
-          users:
-            - name: {{ ssh_user }}
-              groups: [wheel, sudo]
-              sudo: ['ALL=(ALL) NOPASSWD:ALL']
-              shell: /bin/bash
-              lock_passwd: true
-              ssh_authorized_keys:
-                - {{ raspberry_pi_ssh_key }}
-            - name: ubuntu
-              groups: [wheel, sudo]
-              sudo: ['ALL=(ALL) NOPASSWD:ALL']
-              shell: /bin/bash
-              lock_passwd: true
-              ssh_authorized_keys:
-                - {{ raspberry_pi_ssh_key }}
-          
-          ssh_pwauth: false
-          disable_root: false
-          
-          package_update: true
-          package_upgrade: true
-          packages:
-            - qemu-guest-agent
-            - python3
-            - python3-pip
-            - openssh-server
-            - curl
-            - vim
-            - htop
-          
-          runcmd:
-            - systemctl enable ssh
-            - systemctl start ssh
-            - systemctl enable qemu-guest-agent
-            - systemctl start qemu-guest-agent
-            - touch /var/lib/cloud/instance/boot-finished
-            - echo "Cloud-init completed - ready for Pi access" >> /var/log/cloud-init-done.log
-          
-          growpart:
-            mode: auto
-            devices: ['/']
-          
-          final_message: "VM ready for Raspberry Pi SSH access"
-      with_dict: "{{ vm_specs }}"
+  copy:
+    dest: "/tmp/cloud-init-{{ item.key }}.yml"
+    content: |
+      #cloud-config
+      hostname: {{ item.key }}
+      manage_etc_hosts: true
+
+      users:
+        - name: {{ ssh_user }}
+          groups: [wheel, sudo]
+          sudo: ['ALL=(ALL) NOPASSWD:ALL']
+          shell: /bin/bash
+          lock_passwd: true
+          ssh_authorized_keys:
+            - {{ raspberry_pi_ssh_key }}
+        - name: ubuntu
+          groups: [wheel, sudo]
+          sudo: ['ALL=(ALL) NOPASSWD:ALL']
+          shell: /bin/bash
+          lock_passwd: true
+          ssh_authorized_keys:
+            - {{ raspberry_pi_ssh_key }}
+
+      ssh_pwauth: false
+      disable_root: false
+
+      package_update: true
+      package_upgrade: true
+      packages:
+        - qemu-guest-agent
+        - python3
+        - python3-pip
+        - openssh-server
+        - curl
+        - vim
+        - htop
+
+      runcmd:
+        - systemctl enable ssh
+        - systemctl start ssh
+        - systemctl enable qemu-guest-agent
+        - systemctl start qemu-guest-agent
+        - touch /var/lib/cloud/instance/boot-finished
+        - echo "Cloud-init completed - ready for Pi access" >> /var/log/cloud-init-done.log
+
+      growpart:
+        mode: auto
+        devices: ['/']
+
+      final_message: "VM ready for Raspberry Pi SSH access"
+  loop: "{{ vm_specs | dict2items }}"
+
 
     - name: Create cloud-init ISOs
       shell: |
