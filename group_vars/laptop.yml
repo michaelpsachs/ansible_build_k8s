@@ -1,0 +1,22 @@
+raspberry_pi_ssh_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/EjjlcKFIT5KO3lCefJLxI61ZYL2oQ6Zlr665Y2CKn michaelpsachs@gmail.com"
+
+vm_specs:
+  k8s-control:
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    role: control
+  k8s-worker1:
+    memory: 4096
+    vcpus: 2
+    disk: 20
+    role: worker
+  k8s-worker2:
+    memory: 4096
+    vcpus: 2
+    disk: 20
+    role: worker
+
+ssh_user: ansible
+network_name: default
+base_image: "/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img"

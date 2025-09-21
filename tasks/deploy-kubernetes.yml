@@ -1,82 +1,13 @@
----
-# tasks/deploy-kubernetes.yml
-- name: Note about Kubespray deployment
-  debug:
-    msg:
-      - "IMPORTANT: Kubespray will be run from this laptop."
-      - "However, after deployment, you'll manage the cluster from your Raspberry Pi."
-      - "The VMs are configured with your Raspberry Pi's SSH key for management."
+- name: Deploy Kubernetes on VMs
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install k3s on control node
+      shell: |
+        curl -sfL https://get.k3s.io | sh -
+      when: inventory_hostname == "k8s-control"
 
-- name: Run Kubespray cluster deployment
-  shell: |
-    cd ~/kubespray
-    source venv/bin/activate
-    ansible-playbook -i inventory/mycluster/hosts.yml \
-      --become --become-user=root \
-      cluster.yml \
-      -e "ansible_ssh_pipelining=true" \
-      -e "ansible_ssh_extra_args='-o ControlMaster=auto -o ControlPersist=30m'" \
-      -v
-  async: 3600  # 1 hour timeout
-  poll: 30     # Check every 30 seconds
-  register: kubespray_result
-  ignore_errors: yes
-
-- name: Display Kubespray deployment result
-  debug:
-    msg: "Kubernetes cluster deployed successfully!"
-  when: kubespray_result.rc == 0
-
-- name: Fetch kubeconfig from control node
-  fetch:
-    src: /home/{{ ssh_user }}/.kube/config
-    dest: ~/kubeconfig-for-pi
-    flat: yes
-  delegate_to: "{{ vm_ip_addresses['k8s-control'] }}"
-  ignore_errors: yes
-
-- name: Create kubeconfig for Raspberry Pi
-  shell: |
-    # Try to get kubeconfig from control node
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      ansible@{{ vm_ip_addresses['k8s-control'] }} \
-      "sudo cat /etc/kubernetes/admin.conf" > ~/kubeconfig-for-pi 2>/dev/null || \
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      ansible@{{ vm_ip_addresses['k8s-control'] }} \
-      "cat ~/.kube/config" > ~/kubeconfig-for-pi 2>/dev/null || \
-    echo "Could not fetch kubeconfig"
-  ignore_errors: yes
-
-- name: Update kubeconfig server address
-  replace:
-    path: ~/kubeconfig-for-pi
-    regexp: 'server: https://127.0.0.1:6443'
-    replace: "server: https://{{ vm_ip_addresses['k8s-control'] }}:6443"
-  ignore_errors: yes
-
-- name: Display instructions for Raspberry Pi
-  debug:
-    msg:
-      - "==========================================================="
-      - "KUBERNETES CLUSTER READY FOR RASPBERRY PI CONTROL!"
-      - "==========================================================="
-      - ""
-      - "On your Raspberry Pi, do the following:"
-      - ""
-      - "1. Copy the kubeconfig file from this laptop:"
-      - "   scp user@laptop:~/kubeconfig-for-pi ~/.kube/config"
-      - ""
-      - "2. Install kubectl on your Raspberry Pi:"
-      - "   curl -LO https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl"
-      - "   sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl"
-      - ""
-      - "3. Test cluster access:"
-      - "   kubectl get nodes"
-      - ""
-      - "4. SSH to any node:"
-      - "   ssh ansible@{{ vm_ip_addresses['k8s-control'] }}"
-      - "   ssh ansible@{{ vm_ip_addresses['k8s-worker1'] }}"
-      - "   ssh ansible@{{ vm_ip_addresses['k8s-worker2'] }}"
-      - ""
-      - "All nodes are configured with your Raspberry Pi SSH key!"
-      - "==========================================================="
+    - name: Join worker nodes
+      shell: |
+        curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars['k8s-control']['ansible_host'] }}:6443 K3S_TOKEN=YOUR_TOKEN sh -
+      when: inventory_hostname != "k8s-control"
