@@ -6,7 +6,7 @@
   vars:
     kvm_host: "192.168.1.99"
     kvm_user: "mike"
-    ssh_key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
+    ssh_public_key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"  # Changed from ssh_key to ssh_public_key
     cluster_vms:
       k8s-control:
         memory: 4096
@@ -23,35 +23,13 @@
         vcpus: 2
         disk: 20
         role: worker
-
+  
   tasks:
     - name: "Phase 1: Create VMs with reliable SSH"
       include_tasks: tasks/create-vms.yml
-
+    
     - name: "Phase 2: Generate Kubespray inventory"
       include_tasks: tasks/generate-inventory.yml
-
+    
     - name: "Phase 3: Test connectivity"
       include_tasks: tasks/test-connectivity.yml
-
-    - name: "Phase 4: Deploy Kubernetes with Kubespray"
-      include_tasks: tasks/deploy-kubernetes.yml
-
-    - name: "Phase 5: Verify cluster"
-      include_tasks: tasks/verify-cluster.yml
-
-    - name: "Deployment complete"
-      debug:
-        msg: |
-          Kubernetes cluster deployed successfully!
-          
-          Next steps:
-          1. Copy kubeconfig: ansible-playbook get-kubeconfig.yml
-          2. Test cluster: ansible-playbook test-cluster.yml
-          3. Deploy applications to your new cluster
-          
-          Cluster info:
-          - Control plane: k8s-control
-          - Workers: k8s-worker1, k8s-worker2
-          - Network: Calico CNI
-          - Access: kubectl via copied kubeconfig
