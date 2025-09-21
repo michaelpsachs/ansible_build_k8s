@@ -1,45 +1,71 @@
 ---
-# deploy-k8s-cluster.yml - Enhanced version with robust SSH handling
-- name: Complete K8s cluster deployment - VMs + Kubernetes
+# destroy-k8s-cluster.yml - Clean up everything
+- name: Destroy Kubernetes Cluster
   hosts: localhost
-  gather_facts: yes
-  vars:
-    vm_specs:
-      k8s-control:
-        memory: 4096
-        vcpus: 2
-        disk: 30
-        role: control
-      k8s-worker1:
-        memory: 4096
-        vcpus: 2
-        disk: 20
-        role: worker
-      k8s-worker2:
-        memory: 4096
-        vcpus: 2
-        disk: 20
-        role: worker
-    
-    # SSH configuration
-    ssh_user: ansible
-    ssh_retries: 60  # 60 retries with 10 second delay = 10 minutes
-    ssh_delay: 10
-    ssh_timeout: 600  # 10 minutes timeout for SSH operations
-    
-    # Network configuration
-    network_name: default
-    base_image: "/var/lib/libvirt/images/ubuntu-22.04-server-cloudimg-amd64.img"
-    
+  gather_facts: no
+  vars_prompt:
+    - name: confirm_destroy
+      prompt: "This will destroy ALL VMs and data. Type 'yes' to continue:"
+      private: no
+  
   tasks:
-    - name: Phase 1 - Create VMs with reliable SSH
-      include_tasks: tasks/create-vms-enhanced.yml
+    - name: Check if input is exactly 'yes'
+      assert:
+        that: confirm_destroy == "yes"
+        fail_msg: "Destruction cancelled. You must type exactly 'yes' to proceed."
+        success_msg: "Proceeding with cluster destruction..."
 
-    - name: Phase 2 - Verify SSH connectivity
-      include_tasks: tasks/verify-ssh.yml
+    - name: Destroy all VMs and storage
+      shell: |
+        echo "Destroying Kubernetes cluster VMs..."
+        for vm in k8s-control k8s-worker1 k8s-worker2; do
+          echo "Destroying $vm..."
+          virsh destroy $vm 2>/dev/null || true
+          virsh undefine $vm --remove-all-storage 2>/dev/null || true
+        done
+        echo "All VMs destroyed"
 
-    - name: Phase 3 - Generate Kubespray inventory
-      include_tasks: tasks/generate-inventory.yml
+    - name: Clean up disk images
+      shell: |
+        sudo rm -f /var/lib/libvirt/images/k8s-*.qcow2
+      ignore_errors: yes
 
-    - name: Phase 4 - Deploy Kubernetes
-      include_tasks: tasks/deploy-kubernetes.yml
+    - name: Remove cloud-init ISOs
+      shell: |
+        rm -f /tmp/cloud-init-*.iso
+        rm -f /tmp/cloud-init-*.yml
+      ignore_errors: yes
+
+    - name: Clean up generated files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - ~/vm-ips.txt
+        - ~/ssh-config-for-pi.txt
+        - ~/inventory-for-pi.ini
+        - ~/kubeconfig-for-pi
+      ignore_errors: yes
+
+    - name: Clean up Kubespray inventory
+      file:
+        path: ~/kubespray/inventory/mycluster
+        state: absent
+      ignore_errors: yes
+
+    - name: Destruction complete
+      debug:
+        msg:
+          - "======================================="
+          - "Kubernetes cluster destroyed!"
+          - "======================================="
+          - "What was removed:"
+          - "- All 3 VMs (k8s-control, k8s-worker1, k8s-worker2)"
+          - "- All VM disk images"
+          - "- Cloud-init configuration files"
+          - "- Generated configuration files"
+          - "- Kubespray inventory"
+          - ""
+          - "To create a new cluster:"
+          - "ansible-playbook deploy-k8s-cluster.yml"
+          - "======================================="
